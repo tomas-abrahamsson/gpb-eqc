@@ -172,7 +172,6 @@ prop_merge() ->
     ?FORALL(MsgDef,message_def(),
 	?FORALL(Msg,oneof([ M || {{_,M},_}<-MsgDef]),
 	    ?FORALL({Msg1,Msg2},{message(Msg,MsgDef),message(Msg,MsgDef)},
-		    collect({Msg1,Msg2},
 		    begin
 			MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDef),
 			Bin1 = gpb:encode_msg(Msg1,MsgDef),
@@ -181,4 +180,4 @@ prop_merge() ->
 			    gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
 					   Msg,MsgDef),
 			equals(MergedMsg, DecodedMerge)
-                    end)))).
+                    end))).
