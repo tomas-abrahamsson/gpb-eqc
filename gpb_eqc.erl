@@ -191,4 +191,5 @@ prop_merge() ->
 			DecodedMerge =  
 			    gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
 					   Msg,MsgDef),
-			equals(MergedM
+			equals(MergedMsg, DecodedMerge)
+                    end)))).
