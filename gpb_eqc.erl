@@ -168,17 +168,6 @@ prop_encode_decode() ->
 			equals(Msg,DecodedMsg)
 		    end)).
 
-prop_encode_decode_c() ->
-    ?FORALL(MsgDef,message_def(),
-	    ?FORALL(Msg,message(MsgDef),
-		    begin
-			Bin = gpb:encode_msg(Msg,MsgDef),
-			RingBuf = to_spbc_desc(MsgDef),
-			DecodedMsg = 
-			    google:spbc_decode(RingBuf,to_ringbuf(Bin),0),
-			equals(Msg,from_ring_buf(RingBuf))
-		    end)).
-
 prop_merge() ->
     ?FORALL(MsgDef,message_def(),
 	?FORALL(Msg,oneof([ M || {{_,M},_}<-MsgDef]),
