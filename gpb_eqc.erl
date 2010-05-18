@@ -33,7 +33,7 @@ message_def() ->
     ?LET(MsgNames,eqc_gen:non_empty(list(message_name())),
 	 begin
 	     UMsgNames = lists:usort(MsgNames),
-	     [ {{msg,Msg},message_fields(left_of(Msg,UMsgNames))} 
+	     [ {{msg,Msg},message_fields(left_of(Msg,UMsgNames))}
 	       || Msg<-UMsgNames]
 	 end).
 
@@ -46,27 +46,30 @@ message_fields(MsgNames) ->
     %% can we have definitions without any field?
     ?LET(FieldDefs,eqc_gen:non_empty(
 		     list({field_name(),
-			   elements([required,optional,repeated])})),
+			   elements([required,optional,repeated]),
+                           type(MsgNames)})),
 	 begin
 	     UFieldDefs = unique(FieldDefs),
-	     [ #field{name=Field,fnum=length(FieldDefs)-Nr,rnum=Nr+1,
-		      type= type(MsgNames),
+	     [ #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
+		      type=Type,
 		      occurrence=Occurrence,
-		      opts= case Occurrence of
-				repeated ->
-				    elements([[],[packed]]);
+		      opts= case {Occurrence, Type} of
+				{repeated, {msg,_}} ->
+                                    [];
+				{repeated, _Primitive} ->
+				    elements([[], [packed]]);
 				_ ->
 				    []
-			    end}|| 
-		 {{Field,Occurrence},Nr}<-lists:zip(
+			    end}||
+		 {{Field,Occurrence,Type},Nr}<-lists:zip(
 			       UFieldDefs,
 			       lists:seq(1,length(UFieldDefs)))]
 	 end).
 
 unique([]) ->
     [];
-unique([{Key,Value}|Rest]) ->
-    [{Key,Value}|unique([ {K,V} || {K,V}<-Rest, K/=Key])].
+unique([{Key,Value,Type}|Rest]) ->
+    [{Key,Value,Type}|unique([ {K,V,T} || {K,V,T}<-Rest, K/=Key])].
 
 message_name() ->
     elements([m1,m2,m3,m4,m5,m6]).
