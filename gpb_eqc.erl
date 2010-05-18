@@ -25,7 +25,7 @@
          opts       :: [term()]
         }).
 
-message_def() ->
+message_defs() ->
     %% CAn we have messages that refer to themselves?
     %% Actually not if field is required, since then we cannot generate
     %% a message of that kind.
@@ -90,7 +90,7 @@ type([]) ->
 type(MsgNames) ->
     ?LET(MsgName,elements(MsgNames),
 	 elements([bool,sint32,sint64,int32,int64,uint32,
-		   uint64, 
+		   uint64,
 		   %% {'enum',atom()}
 		   %% fixed64,sfixed64,double,string,
 		   %% bytes,
@@ -112,8 +112,8 @@ message(MessageDefs) ->
 
 message(Msg,MessageDefs) ->
     Fields = proplists:get_value({msg,Msg},MessageDefs),
-    FieldValues = 
-	[ value(Field#field.type,Field#field.occurrence,MessageDefs) || 
+    FieldValues =
+	[ value(Field#field.type,Field#field.occurrence,MessageDefs) ||
 	    Field<-Fields],
     list_to_tuple([Msg|FieldValues]).
 
@@ -146,8 +146,8 @@ sint(Base) ->
 
 int(Base) ->
     ?LET(I,uint(Base),
-	 begin 
-	     << N:Base/signed >> = <<I:Base>>, N 
+	 begin
+	     << N:Base/signed >> = <<I:Base>>, N
 	 end).
 
 uint(Base) ->
@@ -163,24 +163,96 @@ exp(N) ->
 %%% properties
 
 prop_encode_decode() ->
-    ?FORALL(MsgDef,message_def(),
-	    ?FORALL(Msg,message(MsgDef),
+    ?FORALL(MsgDefs,message_defs(),
+	    ?FORALL(Msg,message(MsgDefs),
 		    begin
-			Bin = gpb:encode_msg(Msg,MsgDef),
-			DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDef),
+			Bin = gpb:encode_msg(Msg,MsgDefs),
+			DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDefs),
 			equals(Msg,DecodedMsg)
 		    end)).
 
-prop_merge() ->
-    ?FORALL(MsgDef,message_def(),
-	?FORALL(Msg,oneof([ M || {{_,M},_}<-MsgDef]),
-	    ?FORALL({Msg1,Msg2},{message(Msg,MsgDef),message(Msg,MsgDef)},
+prop_encode_decode_via_protoc() ->
+    ?FORALL(MsgDefs,message_defs(),
+	    ?FORALL(Msg,message(MsgDefs),
 		    begin
-			MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDef),
-			Bin1 = gpb:encode_msg(Msg1,MsgDef),
-			Bin2 = gpb:encode_msg(Msg2,MsgDef),
-			DecodedMerge =  
+                        TmpDir = get_create_tmpdir(),
+                        ProtoFile = filename:join(TmpDir, "x.proto"),
+                        ETxtFile = filename:join(TmpDir, "x.etxt"),
+                        EMsgFile = filename:join(TmpDir, "x.emsg"),
+                        PMsgFile = filename:join(TmpDir, "x.pmsg"),
+                        TxtFile = filename:join(TmpDir, "x.txt"),
+                        MsgName = element(1, Msg),
+                        file:write_file(ETxtFile, iolist_to_binary(
+                                                    f("~p~n", [Msg]))),
+                        file:write_file(ProtoFile, msg_defs_to_proto(MsgDefs)),
+                        file:write_file(EMsgFile, gpb:encode_msg(Msg,MsgDefs)),
+                        DRStr = os:cmd(f("protoc --proto_path '~s'"
+                                         " --decode=~s '~s'"
+                                         " < '~s' > '~s'; echo $?~n",
+                                         [TmpDir,
+                                          MsgName, ProtoFile,
+                                          EMsgFile, TxtFile])),
+                        0 = list_to_integer(lib:nonl(DRStr)),
+                        ERStr = os:cmd(f("protoc --proto_path '~s'"
+                                         " --encode=~s '~s'"
+                                         " < '~s' > '~s'; echo $?~n",
+                                         [TmpDir,
+                                          MsgName, ProtoFile,
+                                          TxtFile, PMsgFile])),
+                        0 = list_to_integer(lib:nonl(ERStr)),
+                        {ok, ProtoBin} = file:read_file(PMsgFile),
+                        DecodedMsg = gpb:decode_msg(ProtoBin,MsgName,MsgDefs),
+                        delete_tmpdir(TmpDir),
+                        equals(Msg,DecodedMsg)
+		    end)).
+
+prop_merge() ->
+    ?FORALL(MsgDefs,message_defs(),
+	?FORALL(Msg,oneof([ M || {{_,M},_}<-MsgDefs]),
+	    ?FORALL({Msg1,Msg2},{message(Msg,MsgDefs),message(Msg,MsgDefs)},
+		    begin
+			MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDefs),
+			Bin1 = gpb:encode_msg(Msg1,MsgDefs),
+			Bin2 = gpb:encode_msg(Msg2,MsgDefs),
+			DecodedMerge =
 			    gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
-					   Msg,MsgDef),
+					   Msg,MsgDefs),
 			equals(MergedMsg, DecodedMerge)
                     end))).
+
+get_create_tmpdir() ->
+    D = filename:join("/tmp", f("~s-~s", [?MODULE, os:getpid()])),
+    filelib:ensure_dir(filename:join(D, "dummy-file-name")),
+    [file:delete(X) || X <- filelib:wildcard(filename:join(D,"*"))],
+    D.
+
+delete_tmpdir(TmpDir) ->
+    [file:delete(X) || X <- filelib:wildcard(filename:join(TmpDir,"*"))],
+    file:del_dir(TmpDir).
+
+msg_defs_to_proto(MsgDefs) ->
+    iolist_to_binary(lists:map(fun msg_def_to_proto/1, MsgDefs)).
+
+msg_def_to_proto({{msg, Name}, Fields}) ->
+    f("message ~s {~n"
+      "~s"
+      "}~n~n",
+      [Name, lists:map(
+               fun(#field{name=FName, fnum=FNum, type=Type,
+                          occurrence=Occurrence, opts=Opts}) ->
+                       f("  ~s ~s ~s = ~w~s;~n",
+                         [Occurrence,
+                          case Type of
+                              {msg,Name2} -> Name2;
+                              Type        -> Type
+                          end,
+                          FName,
+                          FNum,
+                          case lists:member(packed,Opts) of
+                              true  -> " [packed=true]";
+                              false -> ""
+                          end])
+               end,
+               Fields)]).
+
+f(F,A) -> io_lib:format(F,A).
