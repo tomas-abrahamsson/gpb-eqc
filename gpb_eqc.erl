@@ -56,6 +56,10 @@ message_fields(MsgNames) ->
 		      opts= case {Occurrence, Type} of
 				{repeated, {msg,_}} ->
                                     [];
+				{repeated, string} ->
+                                    [];
+				{repeated, bytes} ->
+                                    [];
 				{repeated, _Primitive} ->
 				    elements([[], [packed]]);
 				_ ->
@@ -78,27 +82,22 @@ field_name() ->
     elements([a,b,c,field1,f]).
 
 type([]) ->
-    elements([bool,sint32,sint64,int32,int64,uint32,
-	      uint64
-	      %% {'enum',atom()}
-	      %% fixed64,sfixed64,double,string,
-	      %% bytes,
-	      %% fixed32,
-	      %% sfixed32,
-	      %% float
-	     ]);
+    elements(basic_types());
 type(MsgNames) ->
     ?LET(MsgName,elements(MsgNames),
-	 elements([bool,sint32,sint64,int32,int64,uint32,
-		   uint64,
-		   %% {'enum',atom()}
-		   %% fixed64,sfixed64,double,string,
-		   %% bytes,
-		   {'msg',MsgName}
-		   %% fixed32,
-		   %% sfixed32,
-		   %% float
-		  ])).
+	 elements(basic_types() ++ [{'msg',MsgName}])).
+
+basic_types() ->
+    [bool,sint32,sint64,int32,int64,uint32,
+     uint64,
+     %% {'enum',atom()}
+     fixed64,sfixed64,double,
+     fixed32,
+     sfixed32,
+     float,
+     bytes,
+     string
+    ].
 
 enum() ->
     {{enum,e},[#field{}]}.
@@ -139,7 +138,42 @@ value(int64,_) ->
 value(uint32,_) ->
     uint(32);
 value(uint64,_) ->
-    uint(64).
+    uint(64);
+value(fixed64,_) ->
+    uint(64);
+value(sfixed64,_) ->
+    sint(64);
+value(fixed32,_) ->
+    uint(32);
+value(sfixed32,_) ->
+    sint(32);
+value(double, _) ->
+    real();
+value(float, _) ->
+    %% Can't use real, since we may get into rounding troubles...
+    ?LET({Sign,Exp,Fraction},
+         ?SUCHTHAT({Si,Ex,Fr}, {oneof([0,1]), uint(8), uint(23)},
+                   begin
+                       <<N:32>> = <<Si:1, Ex:8, Fr:23>>,
+                       %% avoid the following:
+                       (Ex =/= 16#ff)                  %% infinity or NaN
+                           andalso (N =/= 16#80000000) %% -0
+                           andalso (N =/= 16#7f800000) %% infinity
+                           andalso (N =/= 16#ff800000) %% -infinity
+                   end),
+         begin
+             <<Fl:32/float>> = <<Sign:1, Exp:8, Fraction:23>>,
+             Fl
+         end);
+value(bytes, _) ->
+    binary();
+value(string, _) ->
+    list(unicode_code_point()).
+
+unicode_code_point() ->
+    %% range 0 -> 10FFFF
+    ?SUCHTHAT(CP, oneof([uint(16), choose(16#10000, 16#10FFFF)]),
+              (CP < 16#D800) orelse (CP > 16#DFFF)).
 
 sint(Base) ->
     int(Base).
