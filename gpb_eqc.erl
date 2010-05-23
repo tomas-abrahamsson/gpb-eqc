@@ -30,26 +30,32 @@ message_defs() ->
     %% Actually not if field is required, since then we cannot generate
     %% a message of that kind.
     %% left_of/1 guarantees that the messages only refer to earlier definitions
-    ?LET(MsgNames,eqc_gen:non_empty(list(message_name())),
-	 begin
-	     UMsgNames = lists:usort(MsgNames),
-	     [ {{msg,Msg},message_fields(left_of(Msg,UMsgNames))}
-	       || Msg<-UMsgNames]
-	 end).
+    ?LET(EnumNames,list(enum_name()),
+         ?LET(MsgNames,eqc_gen:non_empty(list(message_name())),
+              begin
+                  UEnumNames = lists:usort(EnumNames),
+                  UMsgNames = lists:usort(MsgNames),
+                  EnumDefs = [ {{enum,Enum}, enumvalues(Enum)}
+                               || Enum<-UEnumNames],
+                  EnumDefs ++
+                      [ {{msg,Msg},message_fields(left_of(Msg,UMsgNames),
+                                                  UEnumNames)}
+                        || Msg<-UMsgNames]
+              end)).
 
 left_of(X,Xs) ->
     lists:takewhile(fun(Y) ->
 			    Y/=X
 		    end,Xs).
 
-message_fields(MsgNames) ->
+message_fields(MsgNames, EnumNames) ->
     %% can we have definitions without any field?
     ?LET(FieldDefs,eqc_gen:non_empty(
 		     list({field_name(),
 			   elements([required,optional,repeated]),
-                           type(MsgNames)})),
+                           msg_field_type(MsgNames, EnumNames)})),
 	 begin
-	     UFieldDefs = unique(FieldDefs),
+	     UFieldDefs = keyunique(1, FieldDefs),
 	     [ #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
 		      type=Type,
 		      occurrence=Occurrence,
@@ -70,10 +76,10 @@ message_fields(MsgNames) ->
 			       lists:seq(1,length(UFieldDefs)))]
 	 end).
 
-unique([]) ->
+keyunique(_N, []) ->
     [];
-unique([{Key,Value,Type}|Rest]) ->
-    [{Key,Value,Type}|unique([ {K,V,T} || {K,V,T}<-Rest, K/=Key])].
+keyunique(N, [Tuple|Rest]) ->
+    [Tuple| keyunique(N, [ T2 || T2<-Rest, element(N,T2)/=element(N,Tuple)])].
 
 message_name() ->
     elements([m1,m2,m3,m4,m5,m6]).
@@ -81,13 +87,23 @@ message_name() ->
 field_name() ->
     elements([a,b,c,field1,f]).
 
-type([]) ->
-    elements(basic_types());
-type(MsgNames) ->
-    ?LET(MsgName,elements(MsgNames),
-	 elements(basic_types() ++ [{'msg',MsgName}])).
+enum_name() ->
+    elements([e1,e2,e3,e4,e5,e6]).
 
-basic_types() ->
+msg_field_type([], []) ->
+    elements(basic_msg_field_types());
+msg_field_type([], EnumNames) ->
+    ?LET(EnumName,elements(EnumNames),
+         elements(basic_msg_field_types() ++ [{enum, EnumName}]));
+msg_field_type(MsgNames, []) ->
+    ?LET(MsgName,elements(MsgNames),
+	 elements(basic_msg_field_types() ++ [{'msg',MsgName}]));
+msg_field_type(MsgNames, EnumNames) ->
+    ?LET({MsgName, EnumName}, {elements(MsgNames), elements(EnumNames)},
+         elements(basic_msg_field_types() ++
+                  [{enum, EnumName}, {'msg',MsgName}])).
+
+basic_msg_field_types() ->
     [bool,sint32,sint64,int32,int64,uint32,
      uint64,
      %% {'enum',atom()}
@@ -99,14 +115,24 @@ basic_types() ->
      string
     ].
 
-enum() ->
-    {{enum,e},[#field{}]}.
+enumvalues(EnumName) ->
+    ?LET(Vs, eqc_gen:non_empty(list(enumvalue(EnumName))),
+         keyunique(2, (keyunique(1, Vs)))).
+
+enumvalue(EnumName) ->
+    ?LET(E, {enumeratorname(EnumName), nat()},
+         E).
+
+enumeratorname(EnumName) ->
+    elements([list_to_atom(atom_to_list(EnumName)++"_"++atom_to_list(S))
+              || S <- [x1, x2, x3, x4, x5, x6, x7]]).
 
 
 %% generator for messages that respect message definitions
 
 message(MessageDefs) ->
-    ?LET({{msg,Msg},_Fields},oneof(MessageDefs),
+    MsgDefs = [MD || {{msg,_MsgName},_}=MD <- MessageDefs], % filter out enums
+    ?LET({{msg,Msg},_Fields},oneof(MsgDefs),
 	 message(Msg,MessageDefs)).
 
 message(Msg,MessageDefs) ->
@@ -125,6 +151,10 @@ value(Type,required,MessageDefs) ->
 
 value({msg,M},MessageDefs) ->
     message(M,MessageDefs);
+value({enum,E},MessageDefs) ->
+    {value, {{enum,E},EnumValues}} = lists:keysearch({enum,E}, 1, MessageDefs),
+    ?LET({Symbolic, _ActualValue}, elements(EnumValues),
+         Symbolic);
 value(bool,_) ->
     bool();
 value(sint32,_) ->
@@ -267,6 +297,12 @@ delete_tmpdir(TmpDir) ->
 msg_defs_to_proto(MsgDefs) ->
     iolist_to_binary(lists:map(fun msg_def_to_proto/1, MsgDefs)).
 
+msg_def_to_proto({{enum, Name}, EnumValues}) ->
+    f("enum ~s {~n"
+      "~s"
+      "}~n~n",
+      [Name, lists:map(fun({N,V}) -> f("  ~s = ~w;~n", [N, V]) end,
+                       EnumValues)]);
 msg_def_to_proto({{msg, Name}, Fields}) ->
     f("message ~s {~n"
       "~s"
@@ -278,6 +314,7 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
                          [Occurrence,
                           case Type of
                               {msg,Name2} -> Name2;
+                              {enum,Name2} -> Name2;
                               Type        -> Type
                           end,
                           FName,
