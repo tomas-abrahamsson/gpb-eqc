@@ -272,7 +272,7 @@ prop_encode_decode_via_protoc() ->
 
 prop_merge() ->
     ?FORALL(MsgDefs,message_defs(),
-	?FORALL(Msg,oneof([ M || {{_,M},_}<-MsgDefs]),
+	?FORALL(Msg,oneof([ M || {{msg,M},_}<-MsgDefs]),
 	    ?FORALL({Msg1,Msg2},{message(Msg,MsgDefs),message(Msg,MsgDefs)},
 		    begin
 			MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDefs),
