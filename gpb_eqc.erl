@@ -181,6 +181,12 @@ value(double, _) ->
     real();
 value(float, _) ->
     %% Can't use real, since we may get into rounding troubles...
+    %% FIXME: We really need a float that can be exactly represented
+    %%        when printed in base 10 (decimal).
+    %%        With 8 digits? The following has been observed:
+    %%        the value 5.093175311087084e-33
+    %%        printed as 5.0931753e-33 by protoc --decode=...
+    %%        then causing a mismatch...
     ?LET({Sign,Exp,Fraction},
          ?SUCHTHAT({Si,Ex,Fr}, {oneof([0,1]), uint(8), uint(23)},
                    begin
