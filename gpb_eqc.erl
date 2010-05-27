@@ -180,27 +180,7 @@ value(sfixed32,_) ->
 value(double, _) ->
     real();
 value(float, _) ->
-    %% Can't use real, since we may get into rounding troubles...
-    %% FIXME: We really need a float that can be exactly represented
-    %%        when printed in base 10 (decimal).
-    %%        With 8 digits? The following has been observed:
-    %%        the value 5.093175311087084e-33
-    %%        printed as 5.0931753e-33 by protoc --decode=...
-    %%        then causing a mismatch...
-    ?LET({Sign,Exp,Fraction},
-         ?SUCHTHAT({Si,Ex,Fr}, {oneof([0,1]), uint(8), uint(23)},
-                   begin
-                       <<N:32>> = <<Si:1, Ex:8, Fr:23>>,
-                       %% avoid the following:
-                       (Ex =/= 16#ff)                  %% infinity or NaN
-                           andalso (N =/= 16#80000000) %% -0
-                           andalso (N =/= 16#7f800000) %% infinity
-                           andalso (N =/= 16#ff800000) %% -infinity
-                   end),
-         begin
-             <<Fl:32/float>> = <<Sign:1, Exp:8, Fraction:23>>,
-             Fl
-         end);
+    float_by_constructing_binary();
 value(bytes, _) ->
     binary();
 value(string, _) ->
@@ -221,16 +201,60 @@ int(Base) ->
 	 end).
 
 uint(Base) ->
-    oneof([ choose(0,exp(B)-1) || B<-lists:seq(1,Base)]).
+    oneof([ choose(0,pow2(B)-1) || B<-lists:seq(1,Base)]).
 
-exp(1) ->
-    2;
-exp(N) ->
-    2*exp(N-1).
+pow2(0)            -> 1;
+pow2(N) when N > 0 -> 2*pow2(N-1);
+pow2(N) when N < 0 -> 1/pow2(-N).
 
 
+
+float_by_constructing_binary() ->
+    ?LET({S, ExpV, ExpS, Fraction},
+         {oneof([0,1]), uint(2), oneof([1,-1]), uint(4)},
+         begin
+             Exp = ExpV * ExpS,
+             FractionBits = bitreverse(<<Fraction:23>>),
+             <<Float:32/float>> = <<S:1, (128+Exp):8, FractionBits/bits>>,
+             Float
+         end).
+
+bitreverse(Bits) when bit_size(Bits) > 0 ->
+    NumRemainingBits = bit_size(Bits) - 1,
+    <<Rest:NumRemainingBits/bits, X:1>> = Bits,
+    <<X:1, (bitreverse(Rest))/bits>>;
+bitreverse(<<>>) ->
+    <<>>.
+
+float_by_summing_fractions() ->
+    ?LET(L, list(pow2fractions()),
+         lists:sum([0.0 | L])).
+
+pow2fractions() ->
+    ?LET({X, Exp}, {nat(), choose(-7, 1)},
+         X * pow2(Exp)).
+
+is_float_exactly_base10representable(X) ->
+    is_float_exactly_base10representable(X, g).
+
+is_float_exactly_base10representable(X, FormatHow) ->
+    X2 = get_base10representation(X, FormatHow),
+    X =:= X2.
+
+get_base10representation(X, FormatHow) ->
+    {ok, [X2], ""} = io_lib:fread("~f", format_float(X, FormatHow)),
+    X2.
+
+format_float(F, g)             -> ff("~g", [F]);
+format_float(F, {g,Precision}) -> ff("~.*g", [Precision, F]);
+format_float(F, f)             -> ff("~f", [F]).
 
 %%% properties
+
+prop_good_floats_1() ->
+    ?FORALL(F, float_by_constructing_binary(),
+            equals(F, get_base10representation(F, g))).
+
 
 prop_encode_decode() ->
     ?FORALL(MsgDefs,message_defs(),
@@ -332,4 +356,5 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
                end,
                Fields)]).
 
+ff(F,A) -> lists:flatten(f(F,A)).
 f(F,A) -> io_lib:format(F,A).
