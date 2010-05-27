@@ -13,7 +13,7 @@
 -type gpb_field_type() :: 'sint32' | 'sint64' | 'int32' | 'int64' | 'uint32'
                           | 'uint64' | 'bool' | {'enum',atom()}
                           | 'fixed64' | 'sfixed64' | 'double' | 'string'
-                          | 'bytes' | {'msg',atom()} | 'packed'
+                          | 'bytes' | {'msg',atom()}
                           | 'fixed32' | 'sfixed32' | 'float'.
 
 -record(field,
@@ -106,7 +106,6 @@ msg_field_type(MsgNames, EnumNames) ->
 basic_msg_field_types() ->
     [bool,sint32,sint64,int32,int64,uint32,
      uint64,
-     %% {'enum',atom()}
      fixed64,sfixed64,double,
      fixed32,
      sfixed32,
