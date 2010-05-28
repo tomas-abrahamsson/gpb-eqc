@@ -179,7 +179,7 @@ value(sfixed32,_) ->
 value(double, _) ->
     real();
 value(float, _) ->
-    float_by_constructing_binary();
+    real();
 value(bytes, _) ->
     binary();
 value(string, _) ->
@@ -208,52 +208,7 @@ pow2(N) when N < 0 -> 1/pow2(-N).
 
 
 
-float_by_constructing_binary() ->
-    ?LET({S, ExpV, ExpS, Fraction},
-         {oneof([0,1]), uint(2), oneof([1,-1]), uint(4)},
-         begin
-             Exp = ExpV * ExpS,
-             FractionBits = bitreverse(<<Fraction:23>>),
-             <<Float:32/float>> = <<S:1, (128+Exp):8, FractionBits/bits>>,
-             Float
-         end).
-
-bitreverse(Bits) when bit_size(Bits) > 0 ->
-    NumRemainingBits = bit_size(Bits) - 1,
-    <<Rest:NumRemainingBits/bits, X:1>> = Bits,
-    <<X:1, (bitreverse(Rest))/bits>>;
-bitreverse(<<>>) ->
-    <<>>.
-
-float_by_summing_fractions() ->
-    ?LET(L, list(pow2fractions()),
-         lists:sum([0.0 | L])).
-
-pow2fractions() ->
-    ?LET({X, Exp}, {nat(), choose(-7, 1)},
-         X * pow2(Exp)).
-
-is_float_exactly_base10representable(X) ->
-    is_float_exactly_base10representable(X, g).
-
-is_float_exactly_base10representable(X, FormatHow) ->
-    X2 = get_base10representation(X, FormatHow),
-    X =:= X2.
-
-get_base10representation(X, FormatHow) ->
-    {ok, [X2], ""} = io_lib:fread("~f", format_float(X, FormatHow)),
-    X2.
-
-format_float(F, g)             -> ff("~g", [F]);
-format_float(F, {g,Precision}) -> ff("~.*g", [Precision, F]);
-format_float(F, f)             -> ff("~f", [F]).
-
 %%% properties
-
-prop_good_floats_1() ->
-    ?FORALL(F, float_by_constructing_binary(),
-            equals(F, get_base10representation(F, g))).
-
 
 prop_encode_decode() ->
     ?FORALL(MsgDefs,message_defs(),
@@ -295,9 +250,38 @@ prop_encode_decode_via_protoc() ->
                         0 = list_to_integer(lib:nonl(ERStr)),
                         {ok, ProtoBin} = file:read_file(PMsgFile),
                         DecodedMsg = gpb:decode_msg(ProtoBin,MsgName,MsgDefs),
-                        delete_tmpdir(TmpDir),
-                        equals(Msg,DecodedMsg)
+                        case msg_approximately_equals(Msg, DecodedMsg) of
+                            true  ->
+                                delete_tmpdir(TmpDir),
+                                true;
+                            false ->
+                                %% Run equals, even though we know it'll return
+                                %% false, because it'll show the messages
+                                %% appropritately -- e.g. not when shrinking.
+                                equals(Msg,DecodedMsg)
+                        end
 		    end)).
+
+msg_approximately_equals({M, Fields1}, {M, Fields2}) when length(Fields1) ==
+                                                          length(Fields2) ->
+    lists:all(fun({F1, F2}) -> field_approximately_equals(F1, F2) end,
+              lists:zip(Fields1, Fields2));
+msg_approximately_equals(_, _) ->
+    false.
+
+field_approximately_equals(F1, F2) when is_float(F1), is_float(F2) ->
+    is_within_percent(F1, F2, 0.001);
+field_approximately_equals(X, X) ->
+    true;
+field_approximately_equals(Msg1, Msg2) when is_tuple(Msg1), is_tuple(Msg2) ->
+    msg_approximately_equals(Msg1, Msg2);
+field_approximately_equals(_, _) ->
+    false.
+
+is_within_percent(F1, F2, PercentsAllowedDeviation) ->
+    AllowedDeviation = PercentsAllowedDeviation / 100,
+    abs(F1 - F2) < (AllowedDeviation * F1).
+
 
 prop_merge() ->
     ?FORALL(MsgDefs,message_defs(),
@@ -355,5 +339,4 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
                end,
                Fields)]).
 
-ff(F,A) -> lists:flatten(f(F,A)).
 f(F,A) -> io_lib:format(F,A).
