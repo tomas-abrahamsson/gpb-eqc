@@ -216,7 +216,7 @@ prop_encode_decode() ->
 		    begin
 			Bin = gpb:encode_msg(Msg,MsgDefs),
 			DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDefs),
-			equals(Msg,DecodedMsg)
+			msg_equals(Msg,DecodedMsg)
 		    end)).
 
 prop_encode_decode_via_protoc() ->
@@ -262,21 +262,49 @@ prop_encode_decode_via_protoc() ->
                         end
 		    end)).
 
-msg_approximately_equals({M, Fields1}, {M, Fields2}) when length(Fields1) ==
-                                                          length(Fields2) ->
+msg_equals(Msg1, Msg2) ->
+    case msg_approximately_equals(Msg1, Msg2) of
+	true  ->
+	    true;
+	false ->
+	    %% Run equals, even though we know it'll return
+	    %% false, because it'll show the messages
+	    %% appropritately -- e.g. not when shrinking.
+	    equals(Msg1,Msg2)
+    end.
+
+msg_approximately_equals(M1, M2) when is_tuple(M1), is_tuple(M2),
+				      element(1,M1) == element(1,M2),
+				      tuple_size(M1) == tuple_size(M2) ->
     lists:all(fun({F1, F2}) -> field_approximately_equals(F1, F2) end,
-              lists:zip(Fields1, Fields2));
-msg_approximately_equals(_, _) ->
+              lists:zip(tl(tuple_to_list(M1)),
+			tl(tuple_to_list(M2))));
+msg_approximately_equals(_X, _Y) ->
+    io:format("NOT equal: ~p <--> ~p~n", [_X, _Y]),
     false.
 
 field_approximately_equals(F1, F2) when is_float(F1), is_float(F2) ->
-    is_within_percent(F1, F2, 0.001);
+    is_float_equivalent(F1, F2);
+field_approximately_equals(L1, L2) when is_list(L1), is_list(L2) ->
+    lists:all(fun({E1,E2}) -> field_approximately_equals(E1,E2) end,
+	      lists:zip(L1,L2));
 field_approximately_equals(X, X) ->
     true;
 field_approximately_equals(Msg1, Msg2) when is_tuple(Msg1), is_tuple(Msg2) ->
     msg_approximately_equals(Msg1, Msg2);
-field_approximately_equals(_, _) ->
+field_approximately_equals(_X, _Y) ->
+    io:format("Not equal: ~p <--> ~p~n", [_X, _Y]),
     false.
+
+-define(ABS_ERROR, 1.0e-10). %% was: 1.0e-16
+-define(REL_ERROR, 1.0e-6).  %% was: 1.0e-10
+
+is_float_equivalent(F, F) -> true;
+is_float_equivalent(F1,F2) -> 
+ if (abs(F1-F2) < ?ABS_ERROR) -> true;
+    (abs(F1) > abs(F2))	-> abs( (F1-F2)/F1 ) < ?REL_ERROR;
+    (abs(F1) < abs(F2))	-> abs( (F1-F2)/F2 ) < ?REL_ERROR 
+end.
 
 is_within_percent(F1, F2, PercentsAllowedDeviation) ->
     AllowedDeviation = PercentsAllowedDeviation / 100,
@@ -294,7 +322,7 @@ prop_merge() ->
 			DecodedMerge =
 			    gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
 					   Msg,MsgDefs),
-			equals(MergedMsg, DecodedMerge)
+			msg_equals(MergedMsg, DecodedMerge)
                     end))).
 
 get_create_tmpdir() ->
