@@ -26,23 +26,21 @@
         }).
 
 message_defs() ->
-    %% CAn we have messages that refer to themselves?
+    %% Can we have messages that refer to themselves?
     %% Actually not if field is required, since then we cannot generate
     %% a message of that kind.
     %% left_of/1 guarantees that the messages only refer to earlier definitions
-    ?LET(EnumNames,list(enum_name()),
-         ?LET(MsgNames,eqc_gen:non_empty(list(message_name())),
-              begin
-                  UEnumNames = lists:usort(EnumNames),
-                  UMsgNames = lists:usort(MsgNames),
-                  EnumDefs = [ {{enum,Enum}, enumvalues(Enum)}
-                               || Enum<-UEnumNames],
-                  EnumDefs ++
-                      [ {{msg,Msg},message_fields(left_of(Msg,UMsgNames),
-                                                  UEnumNames)}
-                        || Msg<-UMsgNames]
+    %% Enums are globabbly unique. Hence, we generate them globabbly
+    ?LET(MsgNames,eqc_gen:non_empty(ulist("m")),
+	 ?LET(EnumDefs,enums(),
+              begin 
+                  shuffle(EnumDefs ++
+			  [ {{msg,Msg},message_fields(left_of(Msg,MsgNames),
+						      [ EName || {{enum,EName},_}<-EnumDefs])}
+			    || Msg<-MsgNames])
               end)).
 
+%% Take all values left of a certain value
 left_of(X,Xs) ->
     lists:takewhile(fun(Y) ->
 			    Y/=X
@@ -87,8 +85,6 @@ message_name() ->
 field_name() ->
     elements([a,b,c,field1,f]).
 
-enum_name() ->
-    elements([e1,e2,e3,e4,e5,e6]).
 
 msg_field_type([], []) ->
     elements(basic_msg_field_types());
@@ -114,17 +110,37 @@ basic_msg_field_types() ->
      string
     ].
 
-enumvalues(EnumName) ->
-    ?LET(Vs, eqc_gen:non_empty(list(enumvalue(EnumName))),
-         keyunique(2, (keyunique(1, Vs)))).
 
-enumvalue(EnumName) ->
-    ?LET(E, {enumeratorname(EnumName), nat()},
-         E).
+%% In fact, we should improve this to have different enums containing same value
+%% e.g. [ {{enum,e1},[{x1,10}]}, {{enum,x2},[{x2,10}]} ]
+enums() ->
+    ?LET({N,Values,Names},{int(),ulist("x"),ulist("e")},
+	 ?LET(Constants,unique_values(Values,N),
+	      enums(Names,Constants))).
 
-enumeratorname(EnumName) ->
-    elements([list_to_atom(atom_to_list(EnumName)++"_"++atom_to_list(S))
-              || S <- [x1, x2, x3, x4, x5, x6, x7]]).
+ulist(String) ->
+    ?LET(N,nat(),
+	 [ list_to_atom(String++integer_to_list(K)) || K<-lists:seq(1,N) ]).
+
+%% Unique names and unqiue values 
+%% Example
+%% enum file_open_return_values { enoent = 1, exxx=2 } 
+unique_values([],_N) ->
+    [];
+unique_values([Cons|Conss],N) ->
+    ?LET(Next,nat(),
+	 [ {Cons,N} | unique_values(Conss,Next+N+1) ]).
+
+enums([],_Conss) ->
+    [];
+enums(_Enames,[]) ->
+    [];
+enums([Ename|Enames],Conss) ->
+    ?LET(Element,elements(Conss),
+	 begin
+	     Prefix = left_of(Element,Conss)++[Element],
+	     [{{enum,Ename},Prefix}|enums(Enames,Conss--Prefix)]
+	 end).
 
 
 %% generator for messages that respect message definitions
@@ -206,6 +222,11 @@ pow2(0)            -> 1;
 pow2(N) when N > 0 -> 2*pow2(N-1);
 pow2(N) when N < 0 -> 1/pow2(-N).
 
+shuffle([]) ->
+    [];
+shuffle(L) ->
+    ?LET(X,elements(L),[X|shuffle(lists:delete(X,L))]).
+
 
 
 %%% properties
@@ -216,7 +237,8 @@ prop_encode_decode() ->
 		    begin
 			Bin = gpb:encode_msg(Msg,MsgDefs),
 			DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDefs),
-			equals(Msg,DecodedMsg)
+			?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
+				  msg_approximately_equals(Msg,DecodedMsg))
 		    end)).
 
 prop_encode_decode_via_protoc() ->
@@ -250,16 +272,8 @@ prop_encode_decode_via_protoc() ->
                         0 = list_to_integer(lib:nonl(ERStr)),
                         {ok, ProtoBin} = file:read_file(PMsgFile),
                         DecodedMsg = gpb:decode_msg(ProtoBin,MsgName,MsgDefs),
-                        case msg_approximately_equals(Msg, DecodedMsg) of
-                            true  ->
-                                delete_tmpdir(TmpDir),
-                                true;
-                            false ->
-                                %% Run equals, even though we know it'll return
-                                %% false, because it'll show the messages
-                                %% appropritately -- e.g. not when shrinking.
-                                equals(Msg,DecodedMsg)
-                        end
+                        ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
+				  msg_approximately_equals(Msg, DecodedMsg))
 		    end)).
 
 msg_approximately_equals({M, Fields1}, {M, Fields2}) when length(Fields1) ==
