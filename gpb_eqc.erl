@@ -222,13 +222,6 @@ pow2(0)            -> 1;
 pow2(N) when N > 0 -> 2*pow2(N-1);
 pow2(N) when N < 0 -> 1/pow2(-N).
 
-shuffle([]) ->
-    [];
-shuffle(L) ->
-    ?LET(X,elements(L),[X|shuffle(lists:delete(X,L))]).
-
-
-
 %%% properties
 
 prop_encode_decode() ->
