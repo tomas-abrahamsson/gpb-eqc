@@ -9,6 +9,28 @@
 
 -compile(export_all).
 
+%% Eunit integration
+qc_prop_test_() ->
+    AllProps = [Fn || {Fn,Arity} <- ?MODULE:module_info(exports),
+                      is_property(atom_to_list(Fn), Arity)],
+    {Descr, PropsToTest} =
+        case os:find_executable("protoc") of
+            false ->
+                {"QuickCheck tests"
+                 " (note: 'protoc' not in $PATH, so excluding some properties)",
+                 AllProps -- [prop_encode_decode_via_protoc]};
+            P when is_list(P) ->
+                {"QuickCheck tests", AllProps}
+        end,
+    {Descr,
+     {timeout, 120,  %% timeout for all tests
+      [{timeout, 60, %% timeout for each test
+        [{atom_to_list(Prop), fun() -> eqc:quickcheck(?MODULE:Prop()) end}]}
+       || Prop <- PropsToTest]}}.
+
+is_property("prop_"++_, 0)        -> true;
+is_property(_, _)                 -> false.
+
 
 -type gpb_field_type() :: 'sint32' | 'sint64' | 'int32' | 'int64' | 'uint32'
                           | 'uint64' | 'bool' | {'enum',atom()}
