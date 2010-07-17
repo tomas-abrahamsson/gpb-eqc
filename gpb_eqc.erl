@@ -25,7 +25,8 @@ qc_prop_test_() ->
     {Descr,
      {timeout, 120,  %% timeout for all tests
       [{timeout, 60, %% timeout for each test
-        [{atom_to_list(Prop), fun() -> eqc:quickcheck(?MODULE:Prop()) end}]}
+        [{atom_to_list(Prop),
+          fun() -> true = eqc:quickcheck(?MODULE:Prop()) end}]}
        || Prop <- PropsToTest]}}.
 
 is_property("prop_"++_, 0) -> true;
