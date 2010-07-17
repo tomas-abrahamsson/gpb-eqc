@@ -28,8 +28,8 @@ qc_prop_test_() ->
         [{atom_to_list(Prop), fun() -> eqc:quickcheck(?MODULE:Prop()) end}]}
        || Prop <- PropsToTest]}}.
 
-is_property("prop_"++_, 0)        -> true;
-is_property(_, _)                 -> false.
+is_property("prop_"++_, 0) -> true;
+is_property(_, _)          -> false.
 
 
 -type gpb_field_type() :: 'sint32' | 'sint64' | 'int32' | 'int64' | 'uint32'
@@ -54,47 +54,48 @@ message_defs() ->
     %% left_of/1 guarantees that the messages only refer to earlier definitions
     %% Enums are globabbly unique. Hence, we generate them globabbly
     ?LET(MsgNames,eqc_gen:non_empty(ulist("m")),
-	 ?LET(EnumDefs,enums(),
-              begin 
+         ?LET(EnumDefs,enums(),
+              begin
                   shuffle(EnumDefs ++
-			  [ {{msg,Msg},message_fields(left_of(Msg,MsgNames),
-						      [ EName || {{enum,EName},_}<-EnumDefs])}
-			    || Msg<-MsgNames])
+                          [ {{msg,Msg},message_fields(
+                                         left_of(Msg,MsgNames),
+                                         [ EName || {{enum,EName},_}<-EnumDefs])}
+                            || Msg<-MsgNames])
               end)).
 
 %% Take all values left of a certain value
 left_of(X,Xs) ->
     lists:takewhile(fun(Y) ->
-			    Y/=X
-		    end,Xs).
+                            Y/=X
+                    end,Xs).
 
 message_fields(MsgNames, EnumNames) ->
     %% can we have definitions without any field?
     ?LET(FieldDefs,eqc_gen:non_empty(
-		     list({field_name(),
-			   elements([required,optional,repeated]),
+                     list({field_name(),
+                           elements([required,optional,repeated]),
                            msg_field_type(MsgNames, EnumNames)})),
-	 begin
-	     UFieldDefs = keyunique(1, FieldDefs),
-	     [ #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
-		      type=Type,
-		      occurrence=Occurrence,
-		      opts= case {Occurrence, Type} of
-				{repeated, {msg,_}} ->
+         begin
+             UFieldDefs = keyunique(1, FieldDefs),
+             [ #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
+                      type=Type,
+                      occurrence=Occurrence,
+                      opts= case {Occurrence, Type} of
+                                {repeated, {msg,_}} ->
                                     [];
-				{repeated, string} ->
+                                {repeated, string} ->
                                     [];
-				{repeated, bytes} ->
+                                {repeated, bytes} ->
                                     [];
-				{repeated, _Primitive} ->
-				    elements([[], [packed]]);
-				_ ->
-				    []
-			    end}||
-		 {{Field,Occurrence,Type},Nr}<-lists:zip(
-			       UFieldDefs,
-			       lists:seq(1,length(UFieldDefs)))]
-	 end).
+                                {repeated, _Primitive} ->
+                                    elements([[], [packed]]);
+                                _ ->
+                                    []
+                            end}||
+                 {{Field,Occurrence,Type},Nr}<-lists:zip(
+                               UFieldDefs,
+                               lists:seq(1,length(UFieldDefs)))]
+         end).
 
 keyunique(_N, []) ->
     [];
@@ -115,7 +116,7 @@ msg_field_type([], EnumNames) ->
          elements(basic_msg_field_types() ++ [{enum, EnumName}]));
 msg_field_type(MsgNames, []) ->
     ?LET(MsgName,elements(MsgNames),
-	 elements(basic_msg_field_types() ++ [{'msg',MsgName}]));
+         elements(basic_msg_field_types() ++ [{'msg',MsgName}]));
 msg_field_type(MsgNames, EnumNames) ->
     ?LET({MsgName, EnumName}, {elements(MsgNames), elements(EnumNames)},
          elements(basic_msg_field_types() ++
@@ -137,21 +138,21 @@ basic_msg_field_types() ->
 %% e.g. [ {{enum,e1},[{x1,10}]}, {{enum,x2},[{x2,10}]} ]
 enums() ->
     ?LET({N,Values,Names},{int(),ulist("x"),ulist("e")},
-	 ?LET(Constants,unique_values(Values,N),
-	      enums(Names,Constants))).
+         ?LET(Constants,unique_values(Values,N),
+              enums(Names,Constants))).
 
 ulist(String) ->
     ?LET(N,nat(),
-	 [ list_to_atom(String++integer_to_list(K)) || K<-lists:seq(1,N) ]).
+         [ list_to_atom(String++integer_to_list(K)) || K<-lists:seq(1,N) ]).
 
-%% Unique names and unqiue values 
+%% Unique names and unqiue values
 %% Example
-%% enum file_open_return_values { enoent = 1, exxx=2 } 
+%% enum file_open_return_values { enoent = 1, exxx=2 }
 unique_values([],_N) ->
     [];
 unique_values([Cons|Conss],N) ->
     ?LET(Next,nat(),
-	 [ {Cons,N} | unique_values(Conss,Next+N+1) ]).
+         [ {Cons,N} | unique_values(Conss,Next+N+1) ]).
 
 enums([],_Conss) ->
     [];
@@ -159,10 +160,10 @@ enums(_Enames,[]) ->
     [];
 enums([Ename|Enames],Conss) ->
     ?LET(Element,elements(Conss),
-	 begin
-	     Prefix = left_of(Element,Conss)++[Element],
-	     [{{enum,Ename},Prefix}|enums(Enames,Conss--Prefix)]
-	 end).
+         begin
+             Prefix = left_of(Element,Conss)++[Element],
+             [{{enum,Ename},Prefix}|enums(Enames,Conss--Prefix)]
+         end).
 
 
 %% generator for messages that respect message definitions
@@ -170,13 +171,13 @@ enums([Ename|Enames],Conss) ->
 message(MessageDefs) ->
     MsgDefs = [MD || {{msg,_MsgName},_}=MD <- MessageDefs], % filter out enums
     ?LET({{msg,Msg},_Fields},oneof(MsgDefs),
-	 message(Msg,MessageDefs)).
+         message(Msg,MessageDefs)).
 
 message(Msg,MessageDefs) ->
     Fields = proplists:get_value({msg,Msg},MessageDefs),
     FieldValues =
-	[ value(Field#field.type,Field#field.occurrence,MessageDefs) ||
-	    Field<-Fields],
+        [ value(Field#field.type,Field#field.occurrence,MessageDefs) ||
+            Field<-Fields],
     list_to_tuple([Msg|FieldValues]).
 
 value(Type,optional,MessageDefs) ->
@@ -233,9 +234,9 @@ sint(Base) ->
 
 int(Base) ->
     ?LET(I,uint(Base),
-	 begin
-	     << N:Base/signed >> = <<I:Base>>, N
-	 end).
+         begin
+             << N:Base/signed >> = <<I:Base>>, N
+         end).
 
 uint(Base) ->
     oneof([ choose(0,pow2(B)-1) || B<-lists:seq(1,Base)]).
@@ -248,18 +249,18 @@ pow2(N) when N < 0 -> 1/pow2(-N).
 
 prop_encode_decode() ->
     ?FORALL(MsgDefs,message_defs(),
-	    ?FORALL(Msg,message(MsgDefs),
-		    begin
-			Bin = gpb:encode_msg(Msg,MsgDefs),
-			DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDefs),
-			?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
-				  msg_approximately_equals(Msg,DecodedMsg))
-		    end)).
+            ?FORALL(Msg,message(MsgDefs),
+                    begin
+                        Bin = gpb:encode_msg(Msg,MsgDefs),
+                        DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDefs),
+                        ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
+                                  msg_approximately_equals(Msg,DecodedMsg))
+                    end)).
 
 prop_encode_decode_via_protoc() ->
     ?FORALL(MsgDefs,message_defs(),
-	    ?FORALL(Msg,message(MsgDefs),
-		    begin
+            ?FORALL(Msg,message(MsgDefs),
+                    begin
                         TmpDir = get_create_tmpdir(),
                         ProtoFile = filename:join(TmpDir, "x.proto"),
                         ETxtFile = filename:join(TmpDir, "x.etxt"),
@@ -288,26 +289,26 @@ prop_encode_decode_via_protoc() ->
                         {ok, ProtoBin} = file:read_file(PMsgFile),
                         DecodedMsg = gpb:decode_msg(ProtoBin,MsgName,MsgDefs),
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
-				  msg_approximately_equals(Msg, DecodedMsg))
-		    end)).
+                                  msg_approximately_equals(Msg, DecodedMsg))
+                    end)).
 
 msg_equals(Msg1, Msg2) ->
     case msg_approximately_equals(Msg1, Msg2) of
-	true  ->
-	    true;
-	false ->
-	    %% Run equals, even though we know it'll return
-	    %% false, because it'll show the messages
-	    %% appropritately -- e.g. not when shrinking.
-	    equals(Msg1,Msg2)
+        true  ->
+            true;
+        false ->
+            %% Run equals, even though we know it'll return
+            %% false, because it'll show the messages
+            %% appropritately -- e.g. not when shrinking.
+            equals(Msg1,Msg2)
     end.
 
 msg_approximately_equals(M1, M2) when is_tuple(M1), is_tuple(M2),
-				      element(1,M1) == element(1,M2),
-				      tuple_size(M1) == tuple_size(M2) ->
+                                      element(1,M1) == element(1,M2),
+                                      tuple_size(M1) == tuple_size(M2) ->
     lists:all(fun({F1, F2}) -> field_approximately_equals(F1, F2) end,
               lists:zip(tl(tuple_to_list(M1)),
-			tl(tuple_to_list(M2))));
+                        tl(tuple_to_list(M2))));
 msg_approximately_equals(_X, _Y) ->
     io:format("NOT equal: ~p <--> ~p~n", [_X, _Y]),
     false.
@@ -316,7 +317,7 @@ field_approximately_equals(F1, F2) when is_float(F1), is_float(F2) ->
     is_float_equivalent(F1, F2);
 field_approximately_equals(L1, L2) when is_list(L1), is_list(L2) ->
     lists:all(fun({E1,E2}) -> field_approximately_equals(E1,E2) end,
-	      lists:zip(L1,L2));
+              lists:zip(L1,L2));
 field_approximately_equals(X, X) ->
     true;
 field_approximately_equals(Msg1, Msg2) when is_tuple(Msg1), is_tuple(Msg2) ->
@@ -329,10 +330,10 @@ field_approximately_equals(_X, _Y) ->
 -define(REL_ERROR, 1.0e-6).  %% was: 1.0e-10
 
 is_float_equivalent(F, F) -> true;
-is_float_equivalent(F1,F2) -> 
+is_float_equivalent(F1,F2) ->
  if (abs(F1-F2) < ?ABS_ERROR) -> true;
-    (abs(F1) > abs(F2))	-> abs( (F1-F2)/F1 ) < ?REL_ERROR;
-    (abs(F1) < abs(F2))	-> abs( (F1-F2)/F2 ) < ?REL_ERROR 
+    (abs(F1) > abs(F2)) -> abs( (F1-F2)/F1 ) < ?REL_ERROR;
+    (abs(F1) < abs(F2)) -> abs( (F1-F2)/F2 ) < ?REL_ERROR
 end.
 
 is_within_percent(F1, F2, PercentsAllowedDeviation) ->
@@ -342,16 +343,16 @@ is_within_percent(F1, F2, PercentsAllowedDeviation) ->
 
 prop_merge() ->
     ?FORALL(MsgDefs,message_defs(),
-	?FORALL(Msg,oneof([ M || {{msg,M},_}<-MsgDefs]),
-	    ?FORALL({Msg1,Msg2},{message(Msg,MsgDefs),message(Msg,MsgDefs)},
-		    begin
-			MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDefs),
-			Bin1 = gpb:encode_msg(Msg1,MsgDefs),
-			Bin2 = gpb:encode_msg(Msg2,MsgDefs),
-			DecodedMerge =
-			    gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
-					   Msg,MsgDefs),
-			msg_equals(MergedMsg, DecodedMerge)
+        ?FORALL(Msg,oneof([ M || {{msg,M},_}<-MsgDefs]),
+            ?FORALL({Msg1,Msg2},{message(Msg,MsgDefs),message(Msg,MsgDefs)},
+                    begin
+                        MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDefs),
+                        Bin1 = gpb:encode_msg(Msg1,MsgDefs),
+                        Bin2 = gpb:encode_msg(Msg2,MsgDefs),
+                        DecodedMerge =
+                            gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
+                                           Msg,MsgDefs),
+                        msg_equals(MergedMsg, DecodedMerge)
                     end))).
 
 get_create_tmpdir() ->
