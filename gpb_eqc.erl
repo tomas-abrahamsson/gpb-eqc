@@ -45,7 +45,8 @@ is_property(_, _)          -> false.
          rnum       :: pos_integer(), %% field number in the record
          type       :: gpb_field_type(),
          occurrence :: 'required' | 'optional' | 'repeated',
-         opts       :: [term()]
+         is_packed = false :: boolean(),
+         opts = []  :: [term()]
         }).
 
 message_defs() ->
@@ -72,30 +73,27 @@ left_of(X,Xs) ->
 
 message_fields(MsgNames, EnumNames) ->
     %% can we have definitions without any field?
-    ?LET(FieldDefs,eqc_gen:non_empty(
-                     list({field_name(),
-                           elements([required,optional,repeated]),
-                           msg_field_type(MsgNames, EnumNames)})),
+    ?LET(FieldDefs, eqc_gen:non_empty(
+                      list({field_name(),
+                            elements([required, optional, repeated]),
+                            msg_field_type(MsgNames, EnumNames)})),
          begin
              UFieldDefs = keyunique(1, FieldDefs),
-             [ #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
-                      type=Type,
-                      occurrence=Occurrence,
-                      opts= case {Occurrence, Type} of
-                                {repeated, {msg,_}} ->
-                                    [];
-                                {repeated, string} ->
-                                    [];
-                                {repeated, bytes} ->
-                                    [];
-                                {repeated, _Primitive} ->
-                                    elements([[], [packed]]);
-                                _ ->
-                                    []
-                            end}||
-                 {{Field,Occurrence,Type},Nr}<-lists:zip(
-                               UFieldDefs,
-                               lists:seq(1,length(UFieldDefs)))]
+             [begin
+                  Packed = case {Occurrence, Type} of
+                               {repeated, {msg,_}}    -> false;
+                               {repeated, string}     -> false;
+                               {repeated, bytes}      -> false;
+                               {repeated, _Primitive} -> elements([false,true]);
+                               _                      -> false
+                           end,
+                  #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
+                         type=Type,
+                         occurrence=Occurrence,
+                         is_packed=Packed}
+              end
+              || {{Field,Occurrence,Type},Nr}
+                     <-lists:zip(UFieldDefs, lists:seq(1,length(UFieldDefs)))]
          end).
 
 keyunique(_N, []) ->
@@ -249,19 +247,41 @@ pow2(N) when N < 0 -> 1/pow2(-N).
 %%% properties
 
 prop_encode_decode() ->
+    Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
-            ?FORALL(Msg,message(MsgDefs),
+            ?FORALL({Msg, Encoder, Decoder},
+                    {message(MsgDefs), oneof([gpb, code]), oneof([gpb, code])},
                     begin
-                        Bin = gpb:encode_msg(Msg,MsgDefs),
-                        DecodedMsg = gpb:decode_msg(Bin,element(1,Msg),MsgDefs),
+                        if Encoder == code; Decoder == code ->
+                                ok = install_msg_defs(Mod, MsgDefs);
+                           true ->
+                                ok
+                        end,
+                        Bin = case Encoder of
+                                  gpb  -> gpb:encode_msg(Msg, MsgDefs);
+                                  code -> Mod:encode_msg(Msg)
+                              end,
+                        MsgName = element(1, Msg),
+                        DecodedMsg =
+                            case Decoder of
+                                gpb  -> gpb:decode_msg(Bin,MsgName,MsgDefs);
+                                code -> Mod:decode_msg(Bin,MsgName)
+                            end,
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
                                   msg_approximately_equals(Msg,DecodedMsg))
                     end)).
 
 prop_encode_decode_via_protoc() ->
+    Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
-            ?FORALL(Msg,message(MsgDefs),
+            ?FORALL({Msg,Encoder, Decoder},
+                    {message(MsgDefs), oneof([gpb, code]), oneof([gpb, code])},
                     begin
+                        if Encoder == code; Decoder == code ->
+                                ok = install_msg_defs(Mod, MsgDefs);
+                           true ->
+                                ok
+                        end,
                         TmpDir = get_create_tmpdir(),
                         ProtoFile = filename:join(TmpDir, "x.proto"),
                         ETxtFile = filename:join(TmpDir, "x.etxt"),
@@ -272,7 +292,11 @@ prop_encode_decode_via_protoc() ->
                         file:write_file(ETxtFile, iolist_to_binary(
                                                     f("~p~n", [Msg]))),
                         file:write_file(ProtoFile, msg_defs_to_proto(MsgDefs)),
-                        file:write_file(EMsgFile, gpb:encode_msg(Msg,MsgDefs)),
+                        GpbBin = case Encoder of
+                                      gpb  -> gpb:encode_msg(Msg,MsgDefs);
+                                      code -> Mod:encode_msg(Msg)
+                                  end,
+                        file:write_file(EMsgFile, GpbBin),
                         DRStr = os:cmd(f("protoc --proto_path '~s'"
                                          " --decode=~s '~s'"
                                          " < '~s' > '~s'; echo $?~n",
@@ -288,10 +312,27 @@ prop_encode_decode_via_protoc() ->
                                           TxtFile, PMsgFile])),
                         0 = list_to_integer(lib:nonl(ERStr)),
                         {ok, ProtoBin} = file:read_file(PMsgFile),
-                        DecodedMsg = gpb:decode_msg(ProtoBin,MsgName,MsgDefs),
+                        DecodedMsg =
+                            case Decoder of
+                                gpb  -> gpb:decode_msg(ProtoBin,MsgName,MsgDefs);
+                                code -> Mod:decode_msg(ProtoBin,MsgName)
+                            end,
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
                                   msg_approximately_equals(Msg, DecodedMsg))
                     end)).
+
+install_msg_defs(Mod, MsgDefs) ->
+    {{ok, Mod, Code},_} = {gpb_compile:msg_defs(Mod, MsgDefs, [binary]),compile},
+    ok = delete_old_versions_of_code(Mod),
+    {{module, Mod},_} = {code:load_binary(Mod, "<nofile>", Code), load_code},
+    ok.
+
+delete_old_versions_of_code(Mod) ->
+    code:purge(Mod),
+    code:delete(Mod),
+    code:purge(Mod),
+    code:delete(Mod),
+    ok.
 
 msg_equals(Msg1, Msg2) ->
     case msg_approximately_equals(Msg1, Msg2) of
@@ -311,7 +352,6 @@ msg_approximately_equals(M1, M2) when is_tuple(M1), is_tuple(M2),
               lists:zip(tl(tuple_to_list(M1)),
                         tl(tuple_to_list(M2))));
 msg_approximately_equals(_X, _Y) ->
-    io:format("NOT equal: ~p <--> ~p~n", [_X, _Y]),
     false.
 
 field_approximately_equals(F1, F2) when is_float(F1), is_float(F2) ->
@@ -380,8 +420,8 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
       "~s"
       "}~n~n",
       [Name, lists:map(
-               fun(#field{name=FName, fnum=FNum, type=Type,
-                          occurrence=Occurrence, opts=Opts}) ->
+               fun(#field{name=FName, fnum=FNum, type=Type, is_packed=Packed,
+                          occurrence=Occurrence}) ->
                        f("  ~s ~s ~s = ~w~s;~n",
                          [Occurrence,
                           case Type of
@@ -391,9 +431,8 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
                           end,
                           FName,
                           FNum,
-                          case lists:member(packed,Opts) of
-                              true  -> " [packed=true]";
-                              false -> ""
+                          if Packed     -> " [packed=true]";
+                             not Packed -> ""
                           end])
                end,
                Fields)]).
