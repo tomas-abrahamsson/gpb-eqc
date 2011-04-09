@@ -249,11 +249,12 @@ pow2(N) when N < 0 -> 1/pow2(-N).
 prop_encode_decode() ->
     Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
-            ?FORALL({Msg, Encoder, Decoder},
-                    {message(MsgDefs), oneof([gpb, code]), oneof([gpb, code])},
+            ?FORALL({Msg, Encoder, Decoder, CopyBytes},
+                    {message(MsgDefs), oneof([gpb, code]), oneof([gpb, code]),
+                     oneof([false, true, auto, choose(2,4)])},
                     begin
                         if Encoder == code; Decoder == code ->
-                                ok = install_msg_defs(Mod, MsgDefs);
+                                ok = install_msg_defs(Mod, MsgDefs, CopyBytes);
                            true ->
                                 ok
                         end,
@@ -322,7 +323,11 @@ prop_encode_decode_via_protoc() ->
                     end)).
 
 install_msg_defs(Mod, MsgDefs) ->
-    {{ok, Mod, Code},_} = {gpb_compile:msg_defs(Mod, MsgDefs, [binary]),compile},
+    install_msg_defs(Mod, MsgDefs, auto).
+
+install_msg_defs(Mod, MsgDefs, CopyBytes) ->
+    Opts = [binary, {copy_bytes, CopyBytes}],
+    {{ok, Mod, Code, _},_} = {gpb_compile:msg_defs(Mod, MsgDefs, Opts),compile},
     ok = delete_old_versions_of_code(Mod),
     {{module, Mod},_} = {code:load_binary(Mod, "<nofile>", Code), load_code},
     ok.
