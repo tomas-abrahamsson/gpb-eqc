@@ -388,16 +388,30 @@ is_within_percent(F1, F2, PercentsAllowedDeviation) ->
 
 
 prop_merge() ->
+    Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
         ?FORALL(Msg,oneof([ M || {{msg,M},_}<-MsgDefs]),
-            ?FORALL({Msg1,Msg2},{message(Msg,MsgDefs),message(Msg,MsgDefs)},
+            ?FORALL({Msg1,Msg2,Encoder1, Encoder2, Decoder, CopyBytes},
+                    {message(Msg,MsgDefs), message(Msg,MsgDefs),
+                     oneof([gpb,code]), oneof([gpb,code]), oneof([gpb,code]),
+                     oneof([false, true, auto, choose(2,4)])},
                     begin
-                        MergedMsg = gpb:merge_msgs(Msg1,Msg2,MsgDefs),
-                        Bin1 = gpb:encode_msg(Msg1,MsgDefs),
-                        Bin2 = gpb:encode_msg(Msg2,MsgDefs),
-                        DecodedMerge =
-                            gpb:decode_msg(<<Bin1/binary,Bin2/binary>>,
-                                           Msg,MsgDefs),
+                        ok = install_msg_defs(Mod, MsgDefs, CopyBytes),
+                        MergedMsg = Mod:merge_msgs(Msg1,Msg2),
+                        Bin1 = case Encoder1 of
+                                   gpb  -> gpb:encode_msg(Msg1, MsgDefs);
+                                   code -> Mod:encode_msg(Msg1)
+                               end,
+                        Bin2 = case Encoder2 of
+                                   gpb  -> gpb:encode_msg(Msg2, MsgDefs);
+                                   code -> Mod:encode_msg(Msg2)
+                               end,
+                        MergedBin = <<Bin1/binary,Bin2/binary>>,
+                        DecodedMerge = case Decoder of
+                                           gpb  -> gpb:decode_msg(MergedBin,Msg,
+                                                                  MsgDefs);
+                                           code -> Mod:decode_msg(MergedBin,Msg)
+                                       end,
                         msg_equals(MergedMsg, DecodedMerge)
                     end))).
 
