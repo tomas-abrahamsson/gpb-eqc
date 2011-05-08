@@ -322,6 +322,71 @@ prop_encode_decode_via_protoc() ->
                                   msg_approximately_equals(Msg, DecodedMsg))
                     end)).
 
+prop_encode_decode_with_skip() ->
+    Mod1 = gpb_eqc_m1,
+    Mod2 = gpb_eqc_m2,
+    ?FORALL(
+       MsgDefs, message_defs(),
+       ?FORALL(
+          {DefsSubset, InitialMsg, Encoder, Decoder, CopyBytes},
+          {message_subset_defs(MsgDefs),
+           message(MsgDefs),
+           oneof([gpb, code]),
+           oneof([gpb, code]),
+           oneof([false, true, auto, choose(2,4)])},
+          begin
+              if Encoder == code; Decoder == code ->
+                      ok = install_msg_defs(Mod1, MsgDefs, CopyBytes),
+                      ok = install_msg_defs(Mod2, DefsSubset, CopyBytes);
+                 true ->
+                      ok
+              end,
+              Encoded1 = case Encoder of
+                             gpb  -> gpb:encode_msg(InitialMsg, MsgDefs);
+                             code -> Mod1:encode_msg(InitialMsg)
+                         end,
+              MsgName = element(1, InitialMsg),
+              Decoded1 = case Decoder of
+                                  gpb  -> gpb:decode_msg(Encoded1,MsgName,DefsSubset);
+                                  code -> Mod2:decode_msg(Encoded1,MsgName)
+                              end,
+              Encoded2 = case Encoder of
+                             gpb  -> gpb:encode_msg(Decoded1, DefsSubset);
+                             code -> Mod2:encode_msg(Decoded1)
+                         end,
+              Decoded2 = case Decoder of
+                             gpb  -> gpb:decode_msg(Encoded2,MsgName,DefsSubset);
+                             code -> Mod2:decode_msg(Encoded2,MsgName)
+                         end,
+              ?WHENFAIL(io:format("~p /= ~p\n",[Decoded1,Decoded2]),
+                        msg_approximately_equals(Decoded1, Decoded2))
+          end)).
+
+message_subset_defs(MsgDefs) ->
+    [case Elem of
+         {{enum,_}, _}=Enum ->
+             Enum;
+         {{msg,MsgName}, MsgFields} ->
+             {{msg, MsgName}, msg_fields_subset(MsgFields)}
+     end
+     || Elem <- MsgDefs].
+
+msg_fields_subset(Fields) ->
+    eqc_gen:non_empty(
+      ?LET(Fields2, [elements([Field, skip]) || Field <- Fields],
+           recalculate_rnums(Fields2))).
+
+recalculate_rnums(FieldsAndSkips) ->
+    {RecalculatedFieldsReversed, _TotalNumSkipped} =
+        lists:foldl(fun(skip, {Fs, NumSkipped}) ->
+                            {Fs, NumSkipped+1};
+                       (#field{rnum=RNum}=F, {Fs, NumSkipped}) ->
+                            {[F#field{rnum=RNum-NumSkipped} | Fs], NumSkipped}
+                    end,
+                    {[], 0},
+                    FieldsAndSkips),
+    lists:reverse(RecalculatedFieldsReversed).
+
 install_msg_defs(Mod, MsgDefs) ->
     install_msg_defs(Mod, MsgDefs, auto).
 
