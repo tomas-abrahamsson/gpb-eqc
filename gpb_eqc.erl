@@ -391,7 +391,7 @@ install_msg_defs(Mod, MsgDefs) ->
     install_msg_defs(Mod, MsgDefs, auto).
 
 install_msg_defs(Mod, MsgDefs, CopyBytes) ->
-    Opts = [binary, {copy_bytes, CopyBytes}],
+    Opts = [binary, {copy_bytes, CopyBytes}, {verify, always}],
     {{ok, Mod, Code, _},_} = {gpb_compile:msg_defs(Mod, MsgDefs, Opts),compile},
     ok = delete_old_versions_of_code(Mod),
     {{module, Mod},_} = {code:load_binary(Mod, "<nofile>", Code), load_code},
