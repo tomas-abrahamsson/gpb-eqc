@@ -45,7 +45,6 @@ is_property(_, _)          -> false.
          rnum       :: pos_integer(), %% field number in the record
          type       :: gpb_field_type(),
          occurrence :: 'required' | 'optional' | 'repeated',
-         is_packed = false :: boolean(),
          opts = []  :: [term()]
         }).
 
@@ -80,17 +79,17 @@ message_fields(MsgNames, EnumNames) ->
          begin
              UFieldDefs = keyunique(1, FieldDefs),
              [begin
-                  Packed = case {Occurrence, Type} of
-                               {repeated, {msg,_}}    -> false;
-                               {repeated, string}     -> false;
-                               {repeated, bytes}      -> false;
-                               {repeated, _Primitive} -> elements([false,true]);
-                               _                      -> false
-                           end,
+                  Opts = case {Occurrence, Type} of
+                             {repeated, {msg,_}}    -> [];
+                             {repeated, string}     -> [];
+                             {repeated, bytes}      -> [];
+                             {repeated, _Primitive} -> elements([[], [packed]]);
+                             _                      -> []
+                         end,
                   #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
                          type=Type,
                          occurrence=Occurrence,
-                         is_packed=Packed}
+                         opts=Opts}
               end
               || {{Field,Occurrence,Type},Nr}
                      <-lists:zip(UFieldDefs, lists:seq(1,length(UFieldDefs)))]
@@ -504,8 +503,9 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
       "~s"
       "}~n~n",
       [Name, lists:map(
-               fun(#field{name=FName, fnum=FNum, type=Type, is_packed=Packed,
+               fun(#field{name=FName, fnum=FNum, type=Type, opts=Opts,
                           occurrence=Occurrence}) ->
+                       Packed = lists:member(packed, Opts),
                        f("  ~s ~s ~s = ~w~s;~n",
                          [Occurrence,
                           case Type of
