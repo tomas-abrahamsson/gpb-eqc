@@ -1,5 +1,6 @@
 %%% File    : gpb_eqc.erl
 %%% Author  : Thomas Arts <thomas.arts@quviq.com>
+%%% Further developed by: Tomas Abrahamsson <tab@lysator.liu.se>
 %%% Description : Testing protocol buffer implemented by Tomas Abrahamsson
 %%% Created : 12 May 2010 by Thomas Arts
 
@@ -248,77 +249,36 @@ pow2(N) when N < 0 -> 1/pow2(-N).
 prop_encode_decode() ->
     Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
-            ?FORALL({Msg, Encoder, Decoder, CopyBytes},
-                    {message(MsgDefs), oneof([gpb, code]), oneof([gpb, code]),
-                     oneof([false, true, auto, choose(2,4)])},
+            ?FORALL({Msg, {Encoder, Decoder, COpts}},
+                    {message(MsgDefs), encoder_decoder(Mod)},
                     begin
-                        if Encoder == code; Decoder == code ->
-                                ok = install_msg_defs(Mod, MsgDefs, CopyBytes);
-                           true ->
-                                ok
-                        end,
-                        Bin = case Encoder of
-                                  gpb  -> gpb:encode_msg(Msg, MsgDefs);
-                                  code -> Mod:encode_msg(Msg)
-                              end,
                         MsgName = element(1, Msg),
-                        DecodedMsg =
-                            case Decoder of
-                                gpb  -> gpb:decode_msg(Bin,MsgName,MsgDefs);
-                                code -> Mod:decode_msg(Bin,MsgName)
-                            end,
-                        ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
-                                  msg_approximately_equals(Msg,DecodedMsg))
+                        install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
+                        Bin = encode_msg(Msg, MsgDefs, Encoder),
+                        DecodedMsg = decode_msg(Bin, MsgName, MsgDefs, Decoder),
+                        ?WHENFAIL(io:format("~p /= ~p\n",[Msg, DecodedMsg]),
+                                  msg_approximately_equals(Msg, DecodedMsg))
                     end)).
 
 prop_encode_decode_via_protoc() ->
     Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
-            ?FORALL({Msg,Encoder, Decoder},
-                    {message(MsgDefs), oneof([gpb, code]), oneof([gpb, code])},
+            ?FORALL({Msg, {Encoder, Decoder, COpts}},
+                    {message(MsgDefs), encoder_decoder(Mod)},
                     begin
-                        if Encoder == code; Decoder == code ->
-                                ok = install_msg_defs(Mod, MsgDefs);
-                           true ->
-                                ok
-                        end,
-                        TmpDir = get_create_tmpdir(),
-                        ProtoFile = filename:join(TmpDir, "x.proto"),
-                        ETxtFile = filename:join(TmpDir, "x.etxt"),
-                        EMsgFile = filename:join(TmpDir, "x.emsg"),
-                        PMsgFile = filename:join(TmpDir, "x.pmsg"),
-                        TxtFile = filename:join(TmpDir, "x.txt"),
                         MsgName = element(1, Msg),
-                        file:write_file(ETxtFile, iolist_to_binary(
-                                                    f("~p~n", [Msg]))),
-                        file:write_file(ProtoFile, msg_defs_to_proto(MsgDefs)),
-                        GpbBin = case Encoder of
-                                      gpb  -> gpb:encode_msg(Msg,MsgDefs);
-                                      code -> Mod:encode_msg(Msg)
-                                  end,
-                        file:write_file(EMsgFile, GpbBin),
-                        DRStr = os:cmd(f("protoc --proto_path '~s'"
-                                         " --decode=~s '~s'"
-                                         " < '~s' > '~s'; echo $?~n",
-                                         [TmpDir,
-                                          MsgName, ProtoFile,
-                                          EMsgFile, TxtFile])),
-                        0 = list_to_integer(lib:nonl(DRStr)),
-                        ERStr = os:cmd(f("protoc --proto_path '~s'"
-                                         " --encode=~s '~s'"
-                                         " < '~s' > '~s'; echo $?~n",
-                                         [TmpDir,
-                                          MsgName, ProtoFile,
-                                          TxtFile, PMsgFile])),
-                        0 = list_to_integer(lib:nonl(ERStr)),
-                        {ok, ProtoBin} = file:read_file(PMsgFile),
+                        install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
+                        TmpDir = get_create_tmpdir(),
+                        install_msg_defs_as_proto(MsgDefs, TmpDir),
+                        GpbBin = encode_msg(Msg, MsgDefs, Encoder),
+                        ProtoBin = decode_then_reencode_via_protoc(
+                                     GpbBin, Msg, TmpDir),
                         DecodedMsg =
-                            case Decoder of
-                                gpb  -> gpb:decode_msg(ProtoBin,MsgName,MsgDefs);
-                                code -> Mod:decode_msg(ProtoBin,MsgName)
-                            end,
+                            decode_msg(ProtoBin, MsgName, MsgDefs, Decoder),
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
                                   msg_approximately_equals(Msg, DecodedMsg))
+
+
                     end)).
 
 prop_encode_decode_with_skip() ->
@@ -327,39 +287,42 @@ prop_encode_decode_with_skip() ->
     ?FORALL(
        MsgDefs, message_defs(),
        ?FORALL(
-          {DefsSubset, InitialMsg, Encoder, Decoder, CopyBytes},
-          {message_subset_defs(MsgDefs),
-           message(MsgDefs),
-           oneof([gpb, code]),
-           oneof([gpb, code]),
-           oneof([false, true, auto, choose(2,4)])},
+          {Subset, InitialMsg,
+           {Encoder1, Decoder1, COpts1},
+           {Encoder2, Decoder2, COpts2}},
+          {message_subset_defs(MsgDefs), message(MsgDefs),
+           encoder_decoder(Mod1),
+           encoder_decoder(Mod2)},
           begin
-              if Encoder == code; Decoder == code ->
-                      ok = install_msg_defs(Mod1, MsgDefs, CopyBytes),
-                      ok = install_msg_defs(Mod2, DefsSubset, CopyBytes);
-                 true ->
-                      ok
-              end,
-              Encoded1 = case Encoder of
-                             gpb  -> gpb:encode_msg(InitialMsg, MsgDefs);
-                             code -> Mod1:encode_msg(InitialMsg)
-                         end,
               MsgName = element(1, InitialMsg),
-              Decoded1 = case Decoder of
-                                  gpb  -> gpb:decode_msg(Encoded1,MsgName,DefsSubset);
-                                  code -> Mod2:decode_msg(Encoded1,MsgName)
-                              end,
-              Encoded2 = case Encoder of
-                             gpb  -> gpb:encode_msg(Decoded1, DefsSubset);
-                             code -> Mod2:encode_msg(Decoded1)
-                         end,
-              Decoded2 = case Decoder of
-                             gpb  -> gpb:decode_msg(Encoded2,MsgName,DefsSubset);
-                             code -> Mod2:decode_msg(Encoded2,MsgName)
-                         end,
-              ?WHENFAIL(io:format("~p /= ~p\n",[Decoded1,Decoded2]),
+              install_msg_defs(Mod1, MsgDefs, Encoder1, Decoder1, COpts1),
+              install_msg_defs(Mod2, Subset, Encoder2, Decoder2, COpts2),
+              Encoded1 = encode_msg(InitialMsg, MsgDefs, Encoder1),
+              Decoded1 = decode_msg(Encoded1, MsgName,  Subset, Decoder2),
+              Encoded2 = encode_msg(Decoded1, Subset,  Encoder2),
+              Decoded2 = decode_msg(Encoded2, MsgName, Subset, Decoder2),
+              ?WHENFAIL(io:format("~p /= ~p\n",[Decoded1, Decoded2]),
                         msg_approximately_equals(Decoded1, Decoded2))
           end)).
+
+prop_merge() ->
+    Mod = gpb_eqc_m,
+    ?FORALL(MsgDefs,message_defs(),
+        ?FORALL(MsgName, oneof([ M || {{msg,M},_}<-MsgDefs]),
+            ?FORALL({Msg1, Msg2, {Encoder, Decoder, COpts}},
+                    {message(MsgName,MsgDefs), message(MsgName,MsgDefs),
+                     encoder_decoder(Mod)},
+                    begin
+                        install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
+                        MergedMsg =
+                            merge_msgs(Msg1, Msg2, MsgDefs, Encoder, Decoder),
+                        Bin1 = encode_msg(Msg1, MsgDefs, Encoder),
+                        Bin2 = encode_msg(Msg2, MsgDefs, Encoder),
+                        MergedBin = <<Bin1/binary,Bin2/binary>>,
+                        DecodedMerge =
+                            decode_msg(MergedBin, MsgName, MsgDefs, Decoder),
+                        msg_equals(MergedMsg, DecodedMerge)
+                    end))).
 
 message_subset_defs(MsgDefs) ->
     [case Elem of
@@ -386,13 +349,47 @@ recalculate_rnums(FieldsAndSkips) ->
                     FieldsAndSkips),
     lists:reverse(RecalculatedFieldsReversed).
 
-install_msg_defs(Mod, MsgDefs) ->
-    install_msg_defs(Mod, MsgDefs, auto).
+encoder_decoder(Mod) ->
+    {oneof([gpb, Mod]),
+     oneof([gpb, Mod]),
+     [{copy_bytes,        oneof([false, true, auto, choose(2,4)])},
+      {field_pass_method, oneof([pass_as_record, pass_as_params])}]}.
 
-install_msg_defs(Mod, MsgDefs, CopyBytes) ->
-    Opts = [binary, {copy_bytes, CopyBytes}, {verify, always}],
-    {{ok, Mod, Code, []},_} =
-        {gpb_compile:msg_defs(Mod, MsgDefs, [return_warnings | Opts]), compile},
+encode_msg(Msg, MsgDefs, Encoder) ->
+    case Encoder of
+        gpb -> gpb:encode_msg(Msg, MsgDefs);
+        _   -> Encoder:encode_msg(Msg)
+    end.
+
+decode_msg(Bin, MsgName, MsgDefs, Decoder) ->
+    case Decoder of
+        gpb -> gpb:decode_msg(Bin, MsgName, MsgDefs);
+        _   -> Decoder:decode_msg(Bin, MsgName)
+    end.
+
+merge_msgs(Msg1, Msg2, MsgDefs, Encoder, Decoder) ->
+    if Encoder == gpb, Decoder == gpb ->
+            gpb:merge_msgs(Msg1, Msg2, MsgDefs);
+       Encoder /= gpb ->
+            Encoder:merge_msgs(Msg1, Msg2);
+       Decoder /= gpb ->
+            Decoder:merge_msgs(Msg1, Msg2)
+    end.
+
+install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts) ->
+    if Encoder == gpb, Decoder == gpb ->
+            ok; %% nothing needs to be done
+       true ->
+            install_msg_defs_aux(Mod, MsgDefs, COpts)
+    end.
+
+install_msg_defs(Mod, MsgDefs) ->
+    install_msg_defs_aux(Mod, MsgDefs, [{copy_bytes, auto}]).
+
+install_msg_defs_aux(Mod, MsgDefs, Opts) when is_list(Opts) ->
+    Opts2 = [binary, {verify, always}, return_warnings | Opts],
+    {{ok, Mod, Code, []},_} = {gpb_compile:msg_defs(Mod, MsgDefs, Opts2),
+                               compile},
     ok = delete_old_versions_of_code(Mod),
     {{module, Mod},_} = {code:load_binary(Mod, "<nofile>", Code), load_code},
     ok.
@@ -451,35 +448,6 @@ is_within_percent(F1, F2, PercentsAllowedDeviation) ->
     AllowedDeviation = PercentsAllowedDeviation / 100,
     abs(F1 - F2) < (AllowedDeviation * F1).
 
-
-prop_merge() ->
-    Mod = gpb_eqc_m,
-    ?FORALL(MsgDefs,message_defs(),
-        ?FORALL(Msg,oneof([ M || {{msg,M},_}<-MsgDefs]),
-            ?FORALL({Msg1,Msg2,Encoder1, Encoder2, Decoder, CopyBytes},
-                    {message(Msg,MsgDefs), message(Msg,MsgDefs),
-                     oneof([gpb,code]), oneof([gpb,code]), oneof([gpb,code]),
-                     oneof([false, true, auto, choose(2,4)])},
-                    begin
-                        ok = install_msg_defs(Mod, MsgDefs, CopyBytes),
-                        MergedMsg = Mod:merge_msgs(Msg1,Msg2),
-                        Bin1 = case Encoder1 of
-                                   gpb  -> gpb:encode_msg(Msg1, MsgDefs);
-                                   code -> Mod:encode_msg(Msg1)
-                               end,
-                        Bin2 = case Encoder2 of
-                                   gpb  -> gpb:encode_msg(Msg2, MsgDefs);
-                                   code -> Mod:encode_msg(Msg2)
-                               end,
-                        MergedBin = <<Bin1/binary,Bin2/binary>>,
-                        DecodedMerge = case Decoder of
-                                           gpb  -> gpb:decode_msg(MergedBin,Msg,
-                                                                  MsgDefs);
-                                           code -> Mod:decode_msg(MergedBin,Msg)
-                                       end,
-                        msg_equals(MergedMsg, DecodedMerge)
-                    end))).
-
 get_create_tmpdir() ->
     D = filename:join("/tmp", f("~s-~s", [?MODULE, os:getpid()])),
     filelib:ensure_dir(filename:join(D, "dummy-file-name")),
@@ -489,6 +457,10 @@ get_create_tmpdir() ->
 delete_tmpdir(TmpDir) ->
     [file:delete(X) || X <- filelib:wildcard(filename:join(TmpDir,"*"))],
     file:del_dir(TmpDir).
+
+install_msg_defs_as_proto(MsgDefs, TmpDir) ->
+    ProtoFile = filename:join(TmpDir, "x.proto"),
+    ok = file:write_file(ProtoFile, msg_defs_to_proto(MsgDefs)).
 
 msg_defs_to_proto(MsgDefs) ->
     iolist_to_binary(lists:map(fun msg_def_to_proto/1, MsgDefs)).
@@ -521,5 +493,28 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
                           end])
                end,
                Fields)]).
+
+decode_then_reencode_via_protoc(GpbBin, Msg, TmpDir) ->
+    ProtoFile = filename:join(TmpDir, "x.proto"),
+    ETxtFile = filename:join(TmpDir, "x.etxt"),
+    EMsgFile = filename:join(TmpDir, "x.emsg"),
+    PMsgFile = filename:join(TmpDir, "x.pmsg"),
+    TxtFile = filename:join(TmpDir, "x.txt"),
+    MsgName = element(1, Msg),
+    ok = file:write_file(ETxtFile, iolist_to_binary(f("~p~n", [Msg]))),
+    ok = file:write_file(EMsgFile, GpbBin),
+    DRStr = os:cmd(f("protoc --proto_path '~s'"
+                     " --decode=~s '~s'"
+                     " < '~s' > '~s'; echo $?~n",
+                     [TmpDir, MsgName, ProtoFile, EMsgFile, TxtFile])),
+    0 = list_to_integer(lib:nonl(DRStr)),
+    ERStr = os:cmd(f("protoc --proto_path '~s'"
+                     " --encode=~s '~s'"
+                     " < '~s' > '~s'; echo $?~n",
+                     [TmpDir, MsgName, ProtoFile, TxtFile, PMsgFile])),
+    0 = list_to_integer(lib:nonl(ERStr)),
+    {ok, ProtoBin} = file:read_file(PMsgFile),
+    ProtoBin.
+
 
 f(F,A) -> io_lib:format(F,A).
