@@ -23,8 +23,8 @@ qc_prop_test_() ->
                 {"QuickCheck tests", AllProps}
         end,
     {Descr,
-     {timeout, 300,  %% timeout for all tests
-      [{timeout, 150, %% timeout for each test
+     {timeout, 600,  %% timeout for all tests
+      [{timeout, 300, %% timeout for each test
         [{atom_to_list(Prop),
           fun() -> true = eqc:quickcheck(?MODULE:Prop()) end}]}
        || Prop <- PropsToTest]}}.
