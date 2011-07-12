@@ -221,12 +221,19 @@ value(float, _) ->
 value(bytes, _) ->
     binary();
 value(string, _) ->
-    list(unicode_code_point()).
+    list(encodable_unicode_code_point()).
 
-unicode_code_point() ->
-    %% range 0 -> 10FFFF
+encodable_unicode_code_point() ->
+    %% http://www.unicode.org/versions/Unicode6.0.0/ch03.pdf
+    %% * Section 3.3, D9: Code points: integers in the range 0..10ffff
+    %% * Section 3.9: The Unicode Standard supports three character
+    %%   encoding forms: UTF-32, UTF-16, and UTF-8. Each encoding form
+    %%   maps the Unicode code points U+0000..U+D7FF and
+    %%   U+E000..U+10FFFF to unique code unit sequences
     ?SUCHTHAT(CP, oneof([uint(16), choose(16#10000, 16#10FFFF)]),
-              (CP < 16#D800) orelse (CP > 16#DFFF)).
+              (0 =< CP andalso CP =< 16#d7ff)
+              orelse
+                (16#e000 =< CP andalso CP =< 16#10ffff)).
 
 sint(Base) ->
     int(Base).
