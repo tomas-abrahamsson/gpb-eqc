@@ -54,7 +54,7 @@ message_defs() ->
     %% Actually not if field is required, since then we cannot generate
     %% a message of that kind.
     %% left_of/1 guarantees that the messages only refer to earlier definitions
-    %% Enums are globabbly unique. Hence, we generate them globabbly
+    %% Enums are globabbly unique. Hence, we generate them globally
     ?LET(MsgNames,eqc_gen:non_empty(ulist("m")),
          ?LET(EnumDefs,enums(),
               begin
@@ -146,12 +146,12 @@ ulist(String) ->
 
 %% Unique names and unqiue values
 %% Example
-%% enum file_open_return_values { enoent = 1, exxx=2 }
+%% enum file_open_return_values { enoent=1, eacess=2 }
 unique_values([],_N) ->
     [];
 unique_values([Cons|Conss],N) ->
     ?LET(Next,nat(),
-         [ {Cons,N} | unique_values(Conss,Next+N+1) ]).
+         [{Cons,N} | unique_values(Conss,Next+N+1)]).
 
 enums([],_Conss) ->
     [];
@@ -175,8 +175,8 @@ message(MessageDefs) ->
 message(Msg,MessageDefs) ->
     Fields = proplists:get_value({msg,Msg},MessageDefs),
     FieldValues =
-        [ value(Field#field.type,Field#field.occurrence,MessageDefs) ||
-            Field<-Fields],
+        [value(Field#field.type,Field#field.occurrence,MessageDefs)
+         || Field <- Fields],
     list_to_tuple([Msg|FieldValues]).
 
 value(Type,optional,MessageDefs) ->
@@ -260,6 +260,10 @@ prop_encode_decode() ->
                                   msg_approximately_equals(Msg, DecodedMsg))
                     end)).
 
+%% add a round-trip via the `protoc' program in the protobuf package.
+%% The `protoc' is the compiler generates code from a .proto file, but
+%% it can also decode and encode messages on the fly, given a .proto
+%% file, so we can use it as an sort of interop test.
 prop_encode_decode_via_protoc() ->
     Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
@@ -281,6 +285,7 @@ prop_encode_decode_via_protoc() ->
 
                     end)).
 
+%% test that we can ignore unknown fields
 prop_encode_decode_with_skip() ->
     Mod1 = gpb_eqc_m1,
     Mod2 = gpb_eqc_m2,
@@ -298,6 +303,8 @@ prop_encode_decode_with_skip() ->
               install_msg_defs(Mod1, MsgDefs, Encoder1, Decoder1, COpts1),
               install_msg_defs(Mod2, Subset, Encoder2, Decoder2, COpts2),
               Encoded1 = encode_msg(InitialMsg, MsgDefs, Encoder1),
+              %% now decode the byte sequence with a decoder that knows
+              %% only a subset of the fields for each message.
               Decoded1 = decode_msg(Encoded1, MsgName,  Subset, Decoder2),
               Encoded2 = encode_msg(Decoded1, Subset,  Encoder2),
               Decoded2 = decode_msg(Encoded2, MsgName, Subset, Decoder2),
@@ -305,6 +312,7 @@ prop_encode_decode_with_skip() ->
                         msg_approximately_equals(Decoded1, Decoded2))
           end)).
 
+%% test merging of messages
 prop_merge() ->
     Mod = gpb_eqc_m,
     ?FORALL(MsgDefs,message_defs(),
@@ -336,6 +344,7 @@ message_subset_defs(MsgDefs) ->
 msg_fields_subset(Fields) ->
     eqc_gen:non_empty(
       ?LET(Fields2, [elements([Field, skip]) || Field <- Fields],
+           %% compensate for removed fields
            recalculate_rnums(Fields2))).
 
 recalculate_rnums(FieldsAndSkips) ->
