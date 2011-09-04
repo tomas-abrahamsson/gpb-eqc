@@ -299,25 +299,25 @@ prop_encode_decode_with_skip() ->
     ?FORALL(
        MsgDefs, message_defs(),
        ?FORALL(
-          {Subset, InitialMsg,
-           {Encoder1, Decoder1, COpts1},
-           {Encoder2, Decoder2, COpts2}},
-          {message_subset_defs(MsgDefs), message(MsgDefs),
-           encoder_decoder(Mod1),
-           encoder_decoder(Mod2)},
-          begin
-              MsgName = element(1, InitialMsg),
-              install_msg_defs(Mod1, MsgDefs, Encoder1, Decoder1, COpts1),
-              install_msg_defs(Mod2, Subset, Encoder2, Decoder2, COpts2),
-              Encoded1 = encode_msg(InitialMsg, MsgDefs, Encoder1),
-              %% now decode the byte sequence with a decoder that knows
-              %% only a subset of the fields for each message.
-              Decoded1 = decode_msg(Encoded1, MsgName,  Subset, Decoder2),
-              Encoded2 = encode_msg(Decoded1, Subset,  Encoder2),
-              Decoded2 = decode_msg(Encoded2, MsgName, Subset, Decoder2),
-              ?WHENFAIL(io:format("~p /= ~p\n",[Decoded1, Decoded2]),
-                        msg_approximately_equals(Decoded1, Decoded2))
-          end)).
+          InitialMsg, message(MsgDefs),
+          ?FORALL(
+             {{SubMsg, SubDefs},
+              {Encoder1, Decoder1, COpts1},
+              {Encoder2, Decoder2, COpts2}},
+             {message_subset_defs(InitialMsg, MsgDefs),
+              encoder_decoder(Mod1),
+              encoder_decoder(Mod2)},
+             begin
+                 MsgName = element(1, InitialMsg),
+                 install_msg_defs(Mod1, MsgDefs, Encoder1, Decoder1, COpts1),
+                 install_msg_defs(Mod2, SubDefs, Encoder2, Decoder2, COpts2),
+                 Encoded = encode_msg(InitialMsg, MsgDefs, Encoder1),
+                 %% now decode the byte sequence with a decoder that knows
+                 %% only a subset of the fields for each message.
+                 Decoded = decode_msg(Encoded, MsgName,  SubDefs, Decoder2),
+                 ?WHENFAIL(io:format("~p /= ~p\n",[SubMsg, Decoded]),
+                           msg_approximately_equals(SubMsg, Decoded))
+             end))).
 
 %% test merging of messages
 prop_merge() ->
@@ -339,22 +339,59 @@ prop_merge() ->
                         msg_equals(MergedMsg, DecodedMerge)
                     end))).
 
-message_subset_defs(MsgDefs) ->
+%% compute a subset of the fields, and also a subset of the msg,
+%% corresponding to the subset of the fields.
+%% Return {SubsetMsg, SubsetDefs}
+message_subset_defs(Msg, MsgDefs) ->
+    ?LET(DefsWithSkips,
+         [case Elem of
+              {{enum,_}, _}=Enum ->
+                  Enum;
+              {{msg,MsgName}, MsgFields} ->
+                  {{msg, MsgName}, msg_fields_subset_skips(MsgFields)}
+          end
+          || Elem <- MsgDefs],
+         begin
+             SubsetMsg  = remove_fields_by_skips(Msg, DefsWithSkips),
+             SubsetDefs = remove_skips_from_defs(DefsWithSkips),
+             {SubsetMsg, SubsetDefs}
+         end).
+
+msg_fields_subset_skips(Fields) when length(Fields) == 1 ->
+    %% can't remove anything if there's only one field
+    ?LET(_, int(),
+         Fields);
+msg_fields_subset_skips(Fields) ->
+    ?LET(Fields2, [elements([Field, skip]) || Field <- Fields],
+         %% compensate for removed fields
+         Fields2).
+
+remove_fields_by_skips(Msg, DefsWithSkips) ->
+    MsgName = element(1, Msg),
+    {{msg,MsgName}, MsgDef} = lists:keyfind({msg,MsgName}, 1, DefsWithSkips),
+    Fields = [case Field of
+                  #field{type={msg, _SubMsgName}, occurrence=repeated} ->
+                      [remove_fields_by_skips(Elem, DefsWithSkips)
+                       || Elem <- Value];
+                  #field{type={msg, _SubMsgName}} ->
+                      remove_fields_by_skips(Value, DefsWithSkips);
+                  _ ->
+                      Value
+              end
+              || {Value, Field} <- lists:zip(tl(tuple_to_list(Msg)), MsgDef),
+                 Field /= skip],
+    list_to_tuple([MsgName | Fields]).
+
+remove_skips_from_defs(DefsWithSkips) ->
     [case Elem of
          {{enum,_}, _}=Enum ->
              Enum;
-         {{msg,MsgName}, MsgFields} ->
-             {{msg, MsgName}, msg_fields_subset(MsgFields)}
+         {{msg,MsgName}, FieldsAndSkips} ->
+             {{msg, MsgName}, remove_skips_recalculate_rnums(FieldsAndSkips)}
      end
-     || Elem <- MsgDefs].
+     || Elem <- DefsWithSkips].
 
-msg_fields_subset(Fields) ->
-    eqc_gen:non_empty(
-      ?LET(Fields2, [elements([Field, skip]) || Field <- Fields],
-           %% compensate for removed fields
-           recalculate_rnums(Fields2))).
-
-recalculate_rnums(FieldsAndSkips) ->
+remove_skips_recalculate_rnums(FieldsAndSkips) ->
     {RecalculatedFieldsReversed, _TotalNumSkipped} =
         lists:foldl(fun(skip, {Fs, NumSkipped}) ->
                             {Fs, NumSkipped+1};
@@ -404,8 +441,8 @@ install_msg_defs(Mod, MsgDefs) ->
 
 install_msg_defs_aux(Mod, MsgDefs, Opts) when is_list(Opts) ->
     Opts2 = [binary, {verify, always}, return_warnings | Opts],
-    {{ok, Mod, Code, []},_} = {gpb_compile:msg_defs(Mod, MsgDefs, Opts2),
-                               compile},
+    {{ok, Mod, Code, _},_} = {gpb_compile:msg_defs(Mod, MsgDefs, Opts2),
+                              compile},
     ok = delete_old_versions_of_code(Mod),
     {{module, Mod},_} = {code:load_binary(Mod, "<nofile>", Code), load_code},
     ok.
