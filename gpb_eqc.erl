@@ -373,8 +373,12 @@ remove_fields_by_skips(Msg, DefsWithSkips) ->
                   #field{type={msg, _SubMsgName}, occurrence=repeated} ->
                       [remove_fields_by_skips(Elem, DefsWithSkips)
                        || Elem <- Value];
-                  #field{type={msg, _SubMsgName}} ->
-                      remove_fields_by_skips(Value, DefsWithSkips);
+                  #field{type={msg, _SubMsgName}, occurrence=Occurrence} ->
+                      if Occurrence == optional, Value == undefined ->
+                              Value;
+                         true ->
+                              remove_fields_by_skips(Value, DefsWithSkips)
+                      end;
                   _ ->
                       Value
               end
