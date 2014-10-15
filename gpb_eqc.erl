@@ -7,6 +7,7 @@
 -module(gpb_eqc).
 
 -include_lib("eqc/include/eqc.hrl").
+-include("gpb.hrl").
 
 -compile(export_all).
 
@@ -33,21 +34,6 @@ qc_prop_test_() ->
 is_property("prop_"++_, 0) -> true;
 is_property(_, _)          -> false.
 
-
--type gpb_field_type() :: 'sint32' | 'sint64' | 'int32' | 'int64' | 'uint32'
-                          | 'uint64' | 'bool' | {'enum',atom()}
-                          | 'fixed64' | 'sfixed64' | 'double' | 'string'
-                          | 'bytes' | {'msg',atom()}
-                          | 'fixed32' | 'sfixed32' | 'float'.
-
--record(field,
-        {name       :: atom(),
-         fnum       :: integer(),
-         rnum       :: pos_integer(), %% field number in the record
-         type       :: gpb_field_type(),
-         occurrence :: 'required' | 'optional' | 'repeated',
-         opts = []  :: [term()]
-        }).
 
 message_defs() ->
     %% Can we have messages that refer to themselves?
@@ -87,10 +73,10 @@ message_fields(MsgNames, EnumNames) ->
                              {repeated, _Primitive} -> elements([[], [packed]]);
                              _                      -> []
                          end,
-                  #field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
-                         type=Type,
-                         occurrence=Occurrence,
-                         opts=Opts}
+                  #?gpb_field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
+                              type=Type,
+                              occurrence=Occurrence,
+                              opts=Opts}
               end
               || {{Field,Occurrence,Type},Nr}
                      <-lists:zip(UFieldDefs, lists:seq(1,length(UFieldDefs)))]
@@ -175,7 +161,7 @@ message(MessageDefs) ->
 message(Msg,MessageDefs) ->
     Fields = proplists:get_value({msg,Msg},MessageDefs),
     FieldValues =
-        [value(Field#field.type,Field#field.occurrence,MessageDefs)
+        [value(Field#?gpb_field.type,Field#?gpb_field.occurrence,MessageDefs)
          || Field <- Fields],
     list_to_tuple([Msg|FieldValues]).
 
@@ -370,10 +356,10 @@ remove_fields_by_skips(Msg, DefsWithSkips) ->
     MsgName = element(1, Msg),
     {{msg,MsgName}, MsgDef} = lists:keyfind({msg,MsgName}, 1, DefsWithSkips),
     Fields = [case Field of
-                  #field{type={msg, _SubMsgName}, occurrence=repeated} ->
+                  #?gpb_field{type={msg, _SubMsgName}, occurrence=repeated} ->
                       [remove_fields_by_skips(Elem, DefsWithSkips)
                        || Elem <- Value];
-                  #field{type={msg, _SubMsgName}, occurrence=Occurrence} ->
+                  #?gpb_field{type={msg, _SubMsgName}, occurrence=Occurrence} ->
                       if Occurrence == optional, Value == undefined ->
                               Value;
                          true ->
@@ -399,8 +385,8 @@ remove_skips_recalculate_rnums(FieldsAndSkips) ->
     {RecalculatedFieldsReversed, _TotalNumSkipped} =
         lists:foldl(fun(skip, {Fs, NumSkipped}) ->
                             {Fs, NumSkipped+1};
-                       (#field{rnum=RNum}=F, {Fs, NumSkipped}) ->
-                            {[F#field{rnum=RNum-NumSkipped} | Fs], NumSkipped}
+                       (#?gpb_field{rnum=RNum}=F, {Fs, NumSkipped}) ->
+                            {[F#?gpb_field{rnum=RNum-NumSkipped} | Fs], NumSkipped}
                     end,
                     {[], 0},
                     FieldsAndSkips),
@@ -533,8 +519,8 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
       "~s"
       "}~n~n",
       [Name, lists:map(
-               fun(#field{name=FName, fnum=FNum, type=Type, opts=Opts,
-                          occurrence=Occurrence}) ->
+               fun(#?gpb_field{name=FName, fnum=FNum, type=Type, opts=Opts,
+                               occurrence=Occurrence}) ->
                        Packed = lists:member(packed, Opts),
                        f("  ~s ~s ~s = ~w~s;~n",
                          [Occurrence,
