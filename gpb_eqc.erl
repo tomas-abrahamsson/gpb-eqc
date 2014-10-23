@@ -40,7 +40,7 @@ message_defs() ->
     %% Actually not if field is required, since then we cannot generate
     %% a message of that kind.
     %% left_of/1 guarantees that the messages only refer to earlier definitions
-    %% Enums are globabbly unique. Hence, we generate them globally
+    %% Enums are globally unique. Hence, we generate them globally
     ?LET(MsgNames,eqc_gen:non_empty(ulist("m")),
          ?LET(EnumDefs,enums(),
               begin
@@ -59,33 +59,15 @@ left_of(X,Xs) ->
 
 message_fields(MsgNames, EnumNames) ->
     %% can we have definitions without any field?
-    ?LET(FieldDefs, eqc_gen:non_empty(
-                      list({field_name(),
-                            elements([required, optional, repeated]),
-                            msg_field_type(MsgNames, EnumNames)})),
-         begin
-             UFieldDefs = keyunique(1, FieldDefs),
-             [begin
-                  Opts = case {Occurrence, Type} of
-                             {repeated, {msg,_}}    -> [];
-                             {repeated, string}     -> [];
-                             {repeated, bytes}      -> [];
-                             {repeated, _Primitive} -> elements([[], [packed]]);
-                             _                      -> []
-                         end,
-                  #?gpb_field{name=Field,fnum=length(FieldDefs)-Nr+1,rnum=Nr+1,
-                              type=Type,
-                              occurrence=Occurrence,
-                              opts=Opts}
-              end
-              || {{Field,Occurrence,Type},Nr}
-                     <-lists:zip(UFieldDefs, lists:seq(1,length(UFieldDefs)))]
-         end).
-
-keyunique(_N, []) ->
-    [];
-keyunique(N, [Tuple|Rest]) ->
-    [Tuple| keyunique(N, [ T2 || T2<-Rest, element(N,T2)/=element(N,Tuple)])].
+    ?LET({FieldDefs, FNumBase0},
+         {eqc_gen:non_empty(
+            list({elements([{required, msg_field_type(MsgNames, EnumNames)},
+                            {optional, msg_field_type(MsgNames, EnumNames)},
+                            {repeated, msg_field_type(MsgNames, EnumNames)},
+                            {oneof,    oneof_fields(MsgNames, EnumNames)}]),
+                  field_name()})),
+          uint(10)},
+         mk_fields(FieldDefs, FNumBase0+1)).
 
 message_name() ->
     elements([m1,m2,m3,m4,m5,m6]).
@@ -93,6 +75,13 @@ message_name() ->
 field_name() ->
     elements([a,b,c,field1,f]).
 
+oneof_fields(MsgNames, EnumNames) ->
+    ?LET({FieldDefs, FNumBase0},
+         {eqc_gen:non_empty(
+            list({elements([{optional, msg_field_type(MsgNames, EnumNames)}]),
+                  field_name()})),
+          uint(10)},
+         mk_fields(FieldDefs, FNumBase0+1)).
 
 msg_field_type([], []) ->
     elements(basic_msg_field_types());
@@ -118,6 +107,58 @@ basic_msg_field_types() ->
      string
     ].
 
+mk_fields(FieldDefs, FNumBase) ->
+    UFieldDefs = keyunique(2, FieldDefs),
+    {Fields, _NextFNum} =
+        lists:mapfoldl(
+          fun({{{required, Type}, FieldName}, RNum}, FNum) ->
+                  {#?gpb_field{name=FieldName, fnum=FNum, rnum=RNum,
+                               type=Type, occurrence=required, opts=[]},
+                   FNum+1};
+             ({{{optional, Type}, FieldName}, RNum}, FNum) ->
+                  {#?gpb_field{name=FieldName, fnum=FNum, rnum=RNum,
+                               type=Type, occurrence=optional, opts=[]},
+                   FNum+1};
+             ({{{repeated, Type}, FieldName}, RNum}, FNum) ->
+                  Opts = case Type of
+                             {msg,_} -> []; %% FIXME: why not packed?
+                             string  -> []; %% FIXME: why not packed?
+                             bytes   -> []; %% FIXME: why not packed?
+                             _       -> elements([[], [packed]])
+                         end,
+                  {#?gpb_field{name=FieldName, fnum=FNum, rnum=RNum,
+                               type=Type, occurrence=repeated, opts=Opts},
+                   FNum+1};
+             ({{{oneof, OFields}, FieldName}, RNum}, FNum) ->
+                  %% Oneof fields, must have unique names and field numbers
+                  %% (within the message)
+                  {OFields2, NewFNum} =
+                      lists:mapfoldl(
+                        fun(#?gpb_field{name=ONm}=F, OFNum) ->
+                                OFieldName = combine_name(FieldName, ONm),
+                                {F#?gpb_field{name=OFieldName,
+                                              rnum=RNum, fnum=OFNum},
+                                 OFNum+1}
+                        end,
+                        FNum,
+                        OFields),
+                  {#gpb_oneof{name=FieldName, rnum=RNum, fields=OFields2},
+                   NewFNum}
+          end,
+          FNumBase,
+          seq_index(UFieldDefs, 2)),
+    Fields.
+
+keyunique(_N, []) ->
+    [];
+keyunique(N, [Tuple|Rest]) ->
+    [Tuple| keyunique(N, [ T2 || T2<-Rest, element(N,T2)/=element(N,Tuple)])].
+
+seq_index(L, Start) ->
+    lists:zip(L, lists:seq(1+(Start-1),length(L)+(Start-1))).
+
+combine_name(NameA, NameB) ->
+    list_to_atom(lists:concat([NameA, "_", NameB])).
 
 %% In fact, we should improve this to have different enums containing same value
 %% e.g. [ {{enum,e1},[{x1,10}]}, {{enum,x2},[{x2,10}]} ]
@@ -160,17 +201,28 @@ message(MessageDefs) ->
 
 message(Msg,MessageDefs) ->
     Fields = proplists:get_value({msg,Msg},MessageDefs),
-    FieldValues =
-        [value(Field#?gpb_field.type,Field#?gpb_field.occurrence,MessageDefs)
-         || Field <- Fields],
+    FieldValues = [case Field of
+                       #?gpb_field{} -> field_value(Field, MessageDefs);
+                       #gpb_oneof{}  -> oneof_value(Field, MessageDefs)
+                   end
+                   || Field <- Fields],
     list_to_tuple([Msg|FieldValues]).
 
-value(Type,optional,MessageDefs) ->
-    default(undefined,value(Type,MessageDefs));
-value(Type,repeated,MessageDefs) ->
-    list(value(Type,MessageDefs));
-value(Type,required,MessageDefs) ->
-    value(Type,MessageDefs).
+oneof_value(#gpb_oneof{fields=OFields}, MessageDefs) ->
+    ?LET(OField, oneof(OFields),
+         begin
+             #?gpb_field{name=Name} = OField,
+             oneof([undefined,
+                    {Name, field_value(OField#?gpb_field{occurrence=required},
+                                       MessageDefs)}])
+         end).
+
+field_value(#?gpb_field{type=Type, occurrence=Occurrence}, MsgDefs) ->
+    field_val2(Type, Occurrence, MsgDefs).
+
+field_val2(Type, optional, MsgDefs) -> default(undefined, value(Type,MsgDefs));
+field_val2(Type, repeated, MsgDefs) -> list(value(Type, MsgDefs));
+field_val2(Type, required, MsgDefs) -> value(Type,MsgDefs).
 
 value({msg,M},MessageDefs) ->
     message(M,MessageDefs);
@@ -365,6 +417,20 @@ remove_fields_by_skips(Msg, DefsWithSkips) ->
                          true ->
                               remove_fields_by_skips(Value, DefsWithSkips)
                       end;
+                  #gpb_oneof{fields=OFields} ->
+                      case Value of
+                          undefined ->
+                              Value;
+                          {OFName, Value2} ->
+                              Pos = #?gpb_field.name,
+                              case lists:keyfind(OFName, Pos, OFields) of
+                                  #?gpb_field{type={msg, _SubMsgName}} ->
+                                      {OFName, remove_fields_by_skips(
+                                                 Value2, DefsWithSkips)};
+                                  _ ->
+                                      Value
+                              end
+                      end;
                   _ ->
                       Value
               end
@@ -383,13 +449,19 @@ remove_skips_from_defs(DefsWithSkips) ->
 
 remove_skips_recalculate_rnums(FieldsAndSkips) ->
     {RecalculatedFieldsReversed, _TotalNumSkipped} =
-        lists:foldl(fun(skip, {Fs, NumSkipped}) ->
-                            {Fs, NumSkipped+1};
-                       (#?gpb_field{rnum=RNum}=F, {Fs, NumSkipped}) ->
-                            {[F#?gpb_field{rnum=RNum-NumSkipped} | Fs], NumSkipped}
-                    end,
-                    {[], 0},
-                    FieldsAndSkips),
+        lists:foldl(
+          fun(skip, {Fs, NumSkipped}) ->
+                  {Fs, NumSkipped+1};
+             (#?gpb_field{rnum=RNum}=F, {Fs, NumSkipped}) ->
+                  {[F#?gpb_field{rnum=RNum-NumSkipped} | Fs], NumSkipped};
+             (#gpb_oneof{rnum=RNum, fields=OFs}=F, {Fs, NumSkipped}) ->
+                  OFs2 = [O#?gpb_field{rnum=RNum-NumSkipped} || O <- OFs],
+                  F2 = F#gpb_oneof{rnum=RNum-NumSkipped,
+                                   fields=OFs2},
+                  {[F2 | Fs], NumSkipped}
+          end,
+          {[], 0},
+          FieldsAndSkips),
     lists:reverse(RecalculatedFieldsReversed).
 
 encoder_decoder(Mod) ->
@@ -518,24 +590,34 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
     f("message ~s {~n"
       "~s"
       "}~n~n",
-      [Name, lists:map(
-               fun(#?gpb_field{name=FName, fnum=FNum, type=Type, opts=Opts,
-                               occurrence=Occurrence}) ->
-                       Packed = lists:member(packed, Opts),
-                       f("  ~s ~s ~s = ~w~s;~n",
-                         [Occurrence,
-                          case Type of
-                              {msg,Name2} -> Name2;
-                              {enum,Name2} -> Name2;
-                              Type        -> Type
-                          end,
-                          FName,
-                          FNum,
-                          if Packed     -> " [packed=true]";
-                             not Packed -> ""
-                          end])
-               end,
-               Fields)]).
+      [Name, lists:map(fun(#?gpb_field{}=F) -> field_to_proto(F, true);
+                          (#gpb_oneof{}=F) ->  oneof_to_proto(F)
+                       end,
+                       Fields)]).
+
+field_to_proto(#?gpb_field{name=FName, fnum=FNum, type=Type, opts=Opts,
+                           occurrence=Occurrence}, ShowOccurrence) ->
+    Packed = lists:member(packed, Opts),
+    f("  ~s ~s ~s = ~w~s;~n",
+      [if ShowOccurrence     -> Occurrence;
+          not ShowOccurrence -> "  "
+       end,
+       case Type of
+           {msg,Name2} -> Name2;
+           {enum,Name2} -> Name2;
+           Type        -> Type
+       end,
+       FName,
+       FNum,
+       if Packed     -> " [packed=true]";
+          not Packed -> ""
+       end]).
+
+oneof_to_proto(#gpb_oneof{name=FName, fields=OFields}) ->
+    f("  oneof ~s {~n"
+      "~s"
+      "  };~n",
+      [FName, [field_to_proto(OField, false) || OField <- OFields]]).
 
 decode_then_reencode_via_protoc(GpbBin, Msg, TmpDir) ->
     ProtoFile = filename:join(TmpDir, "x.proto"),
