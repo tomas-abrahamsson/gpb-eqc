@@ -299,8 +299,9 @@ prop_encode_decode() ->
                     begin
                         MsgName = element(1, Msg),
                         install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
-                        Bin = encode_msg(Msg, MsgDefs, Encoder),
-                        DecodedMsg = decode_msg(Bin, MsgName, MsgDefs, Decoder),
+                        Bin = encode_msg(Msg, MsgDefs, Encoder, COpts),
+                        DecodedMsg = decode_msg(Bin, MsgName, MsgDefs, Decoder,
+                                                COpts),
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg, DecodedMsg]),
                                   msg_approximately_equals(Msg, DecodedMsg))
                     end)).
@@ -319,11 +320,11 @@ prop_encode_decode_via_protoc() ->
                         install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
                         TmpDir = get_create_tmpdir(),
                         install_msg_defs_as_proto(MsgDefs, TmpDir),
-                        GpbBin = encode_msg(Msg, MsgDefs, Encoder),
+                        GpbBin = encode_msg(Msg, MsgDefs, Encoder, COpts),
                         ProtoBin = decode_then_reencode_via_protoc(
                                      GpbBin, Msg, TmpDir),
-                        DecodedMsg =
-                            decode_msg(ProtoBin, MsgName, MsgDefs, Decoder),
+                        DecodedMsg = decode_msg(ProtoBin, MsgName, MsgDefs,
+                                                Decoder, COpts),
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
                                   msg_approximately_equals(Msg, DecodedMsg))
 
@@ -349,10 +350,11 @@ prop_encode_decode_with_skip() ->
                  MsgName = element(1, InitialMsg),
                  install_msg_defs(Mod1, MsgDefs, Encoder1, Decoder1, COpts1),
                  install_msg_defs(Mod2, SubDefs, Encoder2, Decoder2, COpts2),
-                 Encoded = encode_msg(InitialMsg, MsgDefs, Encoder1),
+                 Encoded = encode_msg(InitialMsg, MsgDefs, Encoder1, COpts1),
                  %% now decode the byte sequence with a decoder that knows
                  %% only a subset of the fields for each message.
-                 Decoded = decode_msg(Encoded, MsgName,  SubDefs, Decoder2),
+                 Decoded = decode_msg(Encoded, MsgName,  SubDefs, Decoder2,
+                                      COpts2),
                  ?WHENFAIL(io:format("~p /= ~p\n",[SubMsg, Decoded]),
                            msg_approximately_equals(SubMsg, Decoded))
              end))).
@@ -367,13 +369,13 @@ prop_merge() ->
                      encoder_decoder(Mod)},
                     begin
                         install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
-                        MergedMsg =
-                            merge_msgs(Msg1, Msg2, MsgDefs, Encoder, Decoder),
-                        Bin1 = encode_msg(Msg1, MsgDefs, Encoder),
-                        Bin2 = encode_msg(Msg2, MsgDefs, Encoder),
+                        MergedMsg = merge_msgs(Msg1, Msg2, MsgDefs,
+                                               Encoder, Decoder, COpts),
+                        Bin1 = encode_msg(Msg1, MsgDefs, Encoder, COpts),
+                        Bin2 = encode_msg(Msg2, MsgDefs, Encoder, COpts),
                         MergedBin = <<Bin1/binary,Bin2/binary>>,
-                        DecodedMerge =
-                            decode_msg(MergedBin, MsgName, MsgDefs, Decoder),
+                        DecodedMerge = decode_msg(MergedBin, MsgName, MsgDefs,
+                                                  Decoder, COpts),
                         msg_equals(MergedMsg, DecodedMerge)
                     end))).
 
@@ -468,28 +470,93 @@ encoder_decoder(Mod) ->
     {oneof([gpb, Mod]),
      oneof([gpb, Mod]),
      [{copy_bytes,        oneof([false, true, auto, choose(2,4)])},
-      {field_pass_method, oneof([pass_as_record, pass_as_params])}]}.
+      {field_pass_method, oneof([pass_as_record, pass_as_params])}]
+     ++ map_opts()}.
 
-encode_msg(Msg, MsgDefs, Encoder) ->
+map_opts() ->
+    HaveMaps = case get(cache_have_maps) of
+                   undefined ->
+                       V = have_maps(),
+                       put(cache_have_maps, V),
+                       V;
+                   V ->
+                       V
+               end,
+    if HaveMaps ->
+            [{maps, oneof([false, true])},
+             {maps_unset_optional, oneof([present_undefined, omitted])}];
+       not HaveMaps ->
+            []
+    end.
+
+have_maps() ->
+    try maps:size(maps:new()) of
+        0 ->
+            true
+    catch error:undef ->
+            false
+    end.
+
+encode_msg(Msg, MsgDefs, Encoder, COpts) ->
     case Encoder of
-        gpb -> gpb:encode_msg(Msg, MsgDefs);
-        _   -> Encoder:encode_msg(Msg)
+        gpb ->
+            gpb:encode_msg(Msg, MsgDefs);
+        _ ->
+            case proplists:get_value(maps, COpts) of
+                false ->
+                    Encoder:encode_msg(Msg);
+                true ->
+                    map_encode_msg(Msg, MsgDefs, Encoder, COpts)
+            end
     end.
 
-decode_msg(Bin, MsgName, MsgDefs, Decoder) ->
+map_encode_msg(Msg, MsgDefs, Encoder, COpts) ->
+    MsgAsMap = msg_to_map(Msg, MsgDefs, COpts),
+    MsgName = element(1, Msg),
+    Encoder:encode_msg(MsgAsMap, MsgName).
+
+decode_msg(Bin, MsgName, MsgDefs, Decoder, COpts) ->
     case Decoder of
-        gpb -> gpb:decode_msg(Bin, MsgName, MsgDefs);
-        _   -> Decoder:decode_msg(Bin, MsgName)
+        gpb ->
+            gpb:decode_msg(Bin, MsgName, MsgDefs);
+        _ ->
+            case proplists:get_value(maps, COpts) of
+                false ->
+                    Decoder:decode_msg(Bin, MsgName);
+                true ->
+                    map_decode_msg(Bin, MsgName, MsgDefs, Decoder)
+            end
     end.
 
-merge_msgs(Msg1, Msg2, MsgDefs, Encoder, Decoder) ->
+map_decode_msg(Bin, MsgName, MsgDefs, Decoder) ->
+    MsgAsMap = Decoder:decode_msg(Bin, MsgName),
+    map_to_msg(MsgAsMap, MsgName, MsgDefs).
+
+merge_msgs(Msg1, Msg2, MsgDefs, Encoder, Decoder, COpts) ->
     if Encoder == gpb, Decoder == gpb ->
             gpb:merge_msgs(Msg1, Msg2, MsgDefs);
        Encoder /= gpb ->
-            Encoder:merge_msgs(Msg1, Msg2);
+            case proplists:get_value(maps, COpts) of
+                false ->
+                    Encoder:merge_msgs(Msg1, Msg2);
+                true ->
+                    map_merge_msgs(Msg1, Msg2, MsgDefs, Encoder, COpts)
+            end;
        Decoder /= gpb ->
-            Decoder:merge_msgs(Msg1, Msg2)
+            case proplists:get_value(maps, COpts) of
+                false ->
+                    Decoder:merge_msgs(Msg1, Msg2);
+                true ->
+                    map_merge_msgs(Msg1, Msg2, MsgDefs, Decoder, COpts)
+            end
     end.
+
+map_merge_msgs(Msg1, Msg2, MsgDefs, Mod, COpts) ->
+    Msg1AsMap = msg_to_map(Msg1, MsgDefs, COpts),
+    Msg2AsMap = msg_to_map(Msg2, MsgDefs, COpts),
+    MsgName = element(1, Msg1),
+    ResultAsMap = Mod:merge_msgs(Msg1AsMap, Msg2AsMap, MsgName),
+    map_to_msg(ResultAsMap, MsgName, MsgDefs).
 
 install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts) ->
     if Encoder == gpb, Decoder == gpb ->
@@ -562,6 +629,88 @@ end.
 is_within_percent(F1, F2, PercentsAllowedDeviation) ->
     AllowedDeviation = PercentsAllowedDeviation / 100,
     abs(F1 - F2) < (AllowedDeviation * F1).
+
+% Recursively translate a record to a map
+msg_to_map(Msg, MsgDefs, COpts) ->
+    MsgName = element(1, Msg),
+    {{msg,MsgName},Fields} = lists:keyfind({msg,MsgName}, 1, MsgDefs),
+    FVs = [case F of
+               #?gpb_field{name=FName}=Field ->
+                   V2 = field_to_map(V, Field, MsgDefs, COpts),
+                   {FName, V2};
+               #gpb_oneof{name=FName, fields=OFields} ->
+                   V2 = case V of
+                            undefined ->
+                                undefined;
+                            {Tag, TV} ->
+                                Field = lists:keyfind(Tag, #?gpb_field.name,
+                                                      OFields),
+                                {Tag, field_to_map(TV, Field, MsgDefs, COpts)}
+                        end,
+                   {FName, V2}
+           end
+           || {F,V} <- lists:zip(Fields, tl(tuple_to_list(Msg)))],
+    case proplists:get_value(maps_unset_optional, COpts) of
+        present_undefined ->
+            maps:from_list(FVs);
+        omitted ->
+            maps:from_list([FV || {_,Value}=FV <- FVs,
+                                  Value /= undefined])
+    end.
+
+field_to_map(V, #?gpb_field{type={msg,_},occurrence=Occurrence},MsgDefs,COpts) ->
+    submsg_to_map(Occurrence, V, MsgDefs, COpts);
+field_to_map(V, _FieldDef, _MsgDefs, _COpts) ->
+    V.
+
+submsg_to_map(required, V, MsgDefs, COpts) ->
+    msg_to_map(V, MsgDefs, COpts);
+submsg_to_map(repeated, Seq, MsgDefs, COpts) ->
+    [msg_to_map(Elem, MsgDefs, COpts) || Elem <- Seq];
+submsg_to_map(optional, V, MsgDefs, COpts) ->
+    if V == undefined -> undefined;
+       V /= undefined -> msg_to_map(V, MsgDefs, COpts)
+    end.
+
+map_to_msg(Map, MsgName, MsgDefs) ->
+    {{msg,MsgName},Fields} = lists:keyfind({msg,MsgName}, 1, MsgDefs),
+    list_to_tuple(
+      [MsgName |
+       [case F of
+            #?gpb_field{name=FName}=Field ->
+                case maps:find(FName, Map) of
+                    error ->
+                        undefined;
+                    {ok, V} ->
+                        field_from_map(V, Field, MsgDefs)
+                end;
+            #gpb_oneof{name=FName, fields=OFields} ->
+                case maps:find(FName, Map) of
+                    error ->
+                        undefined;
+                    {ok, undefined} ->
+                        undefined;
+                    {ok, {Tag, TV}} ->
+                        Field = lists:keyfind(Tag, #?gpb_field.name, OFields),
+                        {Tag, field_from_map(TV, Field, MsgDefs)}
+                end
+        end
+        || F <- Fields]]).
+
+field_from_map(V, #?gpb_field{type={msg,SubMsgName}, occurrence=Occurrence},
+               MsgDefs) ->
+    submsg_from_map(Occurrence, V, SubMsgName, MsgDefs);
+field_from_map(V, _FieldDef, _MsgDefs) ->
+    V.
+
+submsg_from_map(required, Map, MsgName, MsgDefs) ->
+    map_to_msg(Map, MsgName, MsgDefs);
+submsg_from_map(repeated, Seq, MsgName, MsgDefs) ->
+    [map_to_msg(Elem, MsgName, MsgDefs) || Elem <- Seq];
+submsg_from_map(optional, V, MsgName, MsgDefs) ->
+    if V == undefined -> undefined;
+       V /= undefined -> map_to_msg(V, MsgName, MsgDefs)
+    end.
 
 get_create_tmpdir() ->
     D = filename:join("/tmp", f("~s-~s", [?MODULE, os:getpid()])),
