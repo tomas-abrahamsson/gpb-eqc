@@ -16,10 +16,11 @@ qc_prop_test_() ->
     AllProps = [Fn || {Fn,Arity} <- ?MODULE:module_info(exports),
                       is_property(atom_to_list(Fn), Arity)],
     {Descr, PropsToTest} =
-        case os:find_executable("protoc") of
+        case find_protoc() of
             false ->
                 {"QuickCheck tests"
-                 " (note: 'protoc' not in $PATH, so excluding some properties)",
+                 " (note: 'protoc' not in $PATH and no PROTOC env var defined,"
+                 " so excluding some properties)",
                  AllProps -- [prop_encode_decode_via_protoc]};
             P when is_list(P) ->
                 {"QuickCheck tests", AllProps}
@@ -36,6 +37,9 @@ is_property(_, _)          -> false.
 
 
 message_defs() ->
+    message_defs([]).
+
+message_defs(Opts) ->
     %% Can we have messages that refer to themselves?
     %% Actually not if field is required, since then we cannot generate
     %% a message of that kind.
@@ -47,7 +51,8 @@ message_defs() ->
                   shuffle(EnumDefs ++
                           [ {{msg,Msg},message_fields(
                                          left_of(Msg,MsgNames),
-                                         [ EName || {{enum,EName},_}<-EnumDefs])}
+                                         [ EName || {{enum,EName},_}<-EnumDefs],
+                                         Opts)}
                             || Msg<-MsgNames])
               end)).
 
@@ -57,14 +62,17 @@ left_of(X,Xs) ->
                             Y/=X
                     end,Xs).
 
-message_fields(MsgNames, EnumNames) ->
+message_fields(MsgNames, EnumNames, Opts) ->
     %% can we have definitions without any field?
+    DoMapFields = not lists:member(no_maps, Opts),
     ?LET({FieldDefs, FNumBase0},
          {eqc_gen:non_empty(
             list({elements([{required, msg_field_type(MsgNames, EnumNames)},
                             {optional, msg_field_type(MsgNames, EnumNames)},
                             {repeated, msg_field_type(MsgNames, EnumNames)},
-                            {oneof,    oneof_fields(MsgNames, EnumNames)}]),
+                            {oneof,    oneof_fields(MsgNames, EnumNames)}]
+                           ++ [{repeated, map_field(MsgNames, EnumNames)}
+                               || DoMapFields]),
                   field_name()})),
           uint(10)},
          mk_fields(FieldDefs, FNumBase0+1)).
@@ -82,6 +90,11 @@ oneof_fields(MsgNames, EnumNames) ->
                   field_name()})),
           uint(10)},
          mk_fields(FieldDefs, FNumBase0+1)).
+
+map_field(MsgNames, EnumNames) ->
+    ?LET({KeyType,ValueType}, {elements(map_key_types()),
+                               msg_field_type(MsgNames, EnumNames)},
+         {map,KeyType,ValueType}).
 
 msg_field_type([], []) ->
     elements(basic_msg_field_types());
@@ -107,6 +120,15 @@ basic_msg_field_types() ->
      string
     ].
 
+map_key_types() ->
+    [bool,sint32,sint64,int32,int64,uint32,
+     uint64,
+     fixed64,sfixed64,
+     fixed32,
+     sfixed32,
+     bytes
+    ].
+
 mk_fields(FieldDefs, FNumBase) ->
     UFieldDefs = keyunique(2, FieldDefs),
     {Fields, _NextFNum} =
@@ -121,6 +143,7 @@ mk_fields(FieldDefs, FNumBase) ->
                    FNum+1};
              ({{{repeated, Type}, FieldName}, RNum}, FNum) ->
                   Opts = case Type of
+                             {map,_,_} -> [];
                              {msg,_} -> []; %% FIXME: why not packed?
                              string  -> []; %% FIXME: why not packed?
                              bytes   -> []; %% FIXME: why not packed?
@@ -220,9 +243,15 @@ oneof_value(#gpb_oneof{fields=OFields}, MessageDefs) ->
 field_value(#?gpb_field{type=Type, occurrence=Occurrence}, MsgDefs) ->
     field_val2(Type, Occurrence, MsgDefs).
 
-field_val2(Type, optional, MsgDefs) -> default(undefined, value(Type,MsgDefs));
-field_val2(Type, repeated, MsgDefs) -> list(value(Type, MsgDefs));
-field_val2(Type, required, MsgDefs) -> value(Type,MsgDefs).
+field_val2(Type, optional, MsgDefs) ->
+    default(undefined, value(Type,MsgDefs));
+field_val2({map,KeyType,ValueType}, repeated, MsgDefs) ->
+    ?LET(Keys, list(value(KeyType, MsgDefs)),
+         [{Key, value(ValueType, MsgDefs)} || Key <- lists:usort(Keys)]);
+field_val2(Type, repeated, MsgDefs) ->
+    list(value(Type, MsgDefs));
+field_val2(Type, required, MsgDefs) ->
+    value(Type,MsgDefs).
 
 value({msg,M},MessageDefs) ->
     message(M,MessageDefs);
@@ -230,6 +259,8 @@ value({enum,E},MessageDefs) ->
     {value, {{enum,E},EnumValues}} = lists:keysearch({enum,E}, 1, MessageDefs),
     ?LET({Symbolic, _ActualValue}, elements(EnumValues),
          Symbolic);
+value({map,KeyType,ValueType}, MessageDefs) ->
+    {value(KeyType, MessageDefs),value(ValueType, MessageDefs)};
 value(bool,_) ->
     bool();
 value(sint32,_) ->
@@ -303,7 +334,8 @@ prop_encode_decode() ->
                         DecodedMsg = decode_msg(Bin, MsgName, MsgDefs, Decoder,
                                                 COpts),
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg, DecodedMsg]),
-                                  msg_approximately_equals(Msg, DecodedMsg))
+                                  msg_approximately_equals(Msg, DecodedMsg,
+                                                           MsgDefs))
                     end)).
 
 %% add a round-trip via the `protoc' program in the protobuf package.
@@ -311,8 +343,12 @@ prop_encode_decode() ->
 %% it can also decode and encode messages on the fly, given a .proto
 %% file, so we can use it as an sort of interop test.
 prop_encode_decode_via_protoc() ->
+    MDOpts = case check_protoc_can_do_map_fields() of
+                 true  -> [];
+                 false -> [no_maps]
+             end,
     Mod = gpb_eqc_m,
-    ?FORALL(MsgDefs,message_defs(),
+    ?FORALL(MsgDefs,message_defs(MDOpts),
             ?FORALL({Msg, {Encoder, Decoder, COpts}},
                     {message(MsgDefs), encoder_decoder(Mod)},
                     begin
@@ -326,7 +362,8 @@ prop_encode_decode_via_protoc() ->
                         DecodedMsg = decode_msg(ProtoBin, MsgName, MsgDefs,
                                                 Decoder, COpts),
                         ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
-                                  msg_approximately_equals(Msg, DecodedMsg))
+                                  msg_approximately_equals(Msg, DecodedMsg,
+                                                           MsgDefs))
 
 
                     end)).
@@ -356,7 +393,8 @@ prop_encode_decode_with_skip() ->
                  Decoded = decode_msg(Encoded, MsgName,  SubDefs, Decoder2,
                                       COpts2),
                  ?WHENFAIL(io:format("~p /= ~p\n",[SubMsg, Decoded]),
-                           msg_approximately_equals(SubMsg, Decoded))
+                           msg_approximately_equals(SubMsg, Decoded,
+                                                    SubDefs))
              end))).
 
 %% test merging of messages
@@ -376,7 +414,7 @@ prop_merge() ->
                         MergedBin = <<Bin1/binary,Bin2/binary>>,
                         DecodedMerge = decode_msg(MergedBin, MsgName, MsgDefs,
                                                   Decoder, COpts),
-                        msg_equals(MergedMsg, DecodedMerge)
+                        msg_equals(MergedMsg, DecodedMerge, MsgDefs)
                     end))).
 
 %% compute a subset of the fields, and also a subset of the msg,
@@ -413,6 +451,9 @@ remove_fields_by_skips(Msg, DefsWithSkips) ->
                   #?gpb_field{type={msg, _SubMsgName}, occurrence=repeated} ->
                       [remove_fields_by_skips(Elem, DefsWithSkips)
                        || Elem <- Value];
+                  #?gpb_field{type={map,_,{msg, _SubMsgName}}} ->
+                      [{K,remove_fields_by_skips(V, DefsWithSkips)}
+                       || {K, V} <- Value];
                   #?gpb_field{type={msg, _SubMsgName}, occurrence=Occurrence} ->
                       if Occurrence == optional, Value == undefined ->
                               Value;
@@ -583,8 +624,8 @@ delete_old_versions_of_code(Mod) ->
     code:delete(Mod),
     ok.
 
-msg_equals(Msg1, Msg2) ->
-    case msg_approximately_equals(Msg1, Msg2) of
+msg_equals(Msg1, Msg2, MsgDefs) ->
+    case msg_approximately_equals(Msg1, Msg2, MsgDefs) of
         true  ->
             true;
         false ->
@@ -594,25 +635,68 @@ msg_equals(Msg1, Msg2) ->
             equals(Msg1,Msg2)
     end.
 
-msg_approximately_equals(M1, M2) when is_tuple(M1), is_tuple(M2),
-                                      element(1,M1) == element(1,M2),
-                                      tuple_size(M1) == tuple_size(M2) ->
-    lists:all(fun({F1, F2}) -> field_approximately_equals(F1, F2) end,
-              lists:zip(tl(tuple_to_list(M1)),
-                        tl(tuple_to_list(M2))));
-msg_approximately_equals(_X, _Y) ->
+msg_approximately_equals(M1, M2, MsgDefs)
+  when is_tuple(M1), is_tuple(M2),
+       element(1,M1) == element(1,M2),
+       tuple_size(M1) == tuple_size(M2) ->
+    MsgName = element(1,M1),
+    {{msg,MsgName},Fields} = lists:keyfind({msg,MsgName},1,MsgDefs),
+    lists:all(fun({F1, F2, Field}) ->
+                      field_approximately_equals(F1, F2, Field, MsgDefs)
+              end,
+              lists:zip3(tl(tuple_to_list(M1)),
+                         tl(tuple_to_list(M2)),
+                         Fields));
+msg_approximately_equals(_X, _Y, _MsgDefs) ->
     false.
 
-field_approximately_equals(F1, F2) when is_float(F1), is_float(F2) ->
+field_approximately_equals(F1, F2, #?gpb_field{type={map,_,VT}}, MsgDefs) ->
+    lists:all(fun({{K1,V1}, {K2,V2}}) ->
+                      case VT of
+                          {msg,_} ->
+                              is_value_approx_eq(K1,K2)
+                                  andalso
+                                  msg_approximately_equals(V1,V2,MsgDefs);
+                          _ ->
+                              is_value_approx_eq(K1,K2)
+                                  andalso
+                                  is_value_approx_eq(V1,V2)
+                      end
+              end,
+              lists:zip(lists:sort(F1),lists:sort(F2)));
+field_approximately_equals(F1, F2, #?gpb_field{type={msg,_},
+                                               occurrence=Occ}, MsgDefs) ->
+    case Occ of
+        repeated ->
+            lists:all(fun({E1,E2}) -> msg_approximately_equals(E1, E2, MsgDefs)
+                      end,
+                      lists:zip(F1,F2));
+        optional ->
+            if F1 == undefined, F2 == undefined ->
+                    true;
+               true ->
+                    msg_approximately_equals(F1, F2, MsgDefs)
+            end;
+        required ->
+            msg_approximately_equals(F1, F2, MsgDefs)
+    end;
+field_approximately_equals({T,F1}, {T,F2}, #gpb_oneof{fields=OFs},MsgDefs) ->
+    case lists:keyfind(T,#?gpb_field.name,OFs) of
+        #?gpb_field{type={msg,_}} ->
+            msg_approximately_equals(F1, F2, MsgDefs);
+        _ ->
+            is_value_approx_eq(F1, F2)
+    end;
+field_approximately_equals(F1, F2, _Field, _MsgDefs) ->
+    is_value_approx_eq(F1, F2).
+
+is_value_approx_eq(F1, F2) when is_float(F1), is_float(F2) ->
     is_float_equivalent(F1, F2);
-field_approximately_equals(L1, L2) when is_list(L1), is_list(L2) ->
-    lists:all(fun({E1,E2}) -> field_approximately_equals(E1,E2) end,
-              lists:zip(L1,L2));
-field_approximately_equals(X, X) ->
+is_value_approx_eq(L1, L2) when is_list(L1), is_list(L2) ->
+    lists:all(fun({E1,E2}) -> is_value_approx_eq(E1,E2) end, lists:zip(L1,L2));
+is_value_approx_eq(X, X) ->
     true;
-field_approximately_equals(Msg1, Msg2) when is_tuple(Msg1), is_tuple(Msg2) ->
-    msg_approximately_equals(Msg1, Msg2);
-field_approximately_equals(_X, _Y) ->
+is_value_approx_eq(_X, _Y) ->
     io:format("Not equal: ~p <--> ~p~n", [_X, _Y]),
     false.
 
@@ -660,6 +744,13 @@ msg_to_map(Msg, MsgDefs, COpts) ->
 
 field_to_map(V, #?gpb_field{type={msg,_},occurrence=Occurrence},MsgDefs,COpts) ->
     submsg_to_map(Occurrence, V, MsgDefs, COpts);
+field_to_map(V, #?gpb_field{type={map,_,ValueType}}, MsgDefs, COpts) ->
+    maps:from_list(
+      [case ValueType of
+           {msg, _} -> {K, submsg_to_map(required, V2, MsgDefs, COpts)};
+           _        -> {K, V2}
+       end
+       || {K,V2} <- V]);
 field_to_map(V, _FieldDef, _MsgDefs, _COpts) ->
     V.
 
@@ -700,6 +791,12 @@ map_to_msg(Map, MsgName, MsgDefs) ->
 field_from_map(V, #?gpb_field{type={msg,SubMsgName}, occurrence=Occurrence},
                MsgDefs) ->
     submsg_from_map(Occurrence, V, SubMsgName, MsgDefs);
+field_from_map(V, #?gpb_field{type={map,_,ValueType}}, MsgDefs) ->
+    [case ValueType of
+         {msg, Name2} -> {K, submsg_from_map(required, V2, Name2, MsgDefs)};
+         _ -> {K,V2}
+     end
+     || {K,V2} <- maps:to_list(V)];
 field_from_map(V, _FieldDef, _MsgDefs) ->
     V.
 
@@ -777,18 +874,54 @@ decode_then_reencode_via_protoc(GpbBin, Msg, TmpDir) ->
     MsgName = element(1, Msg),
     ok = file:write_file(ETxtFile, iolist_to_binary(f("~p~n", [Msg]))),
     ok = file:write_file(EMsgFile, GpbBin),
-    DRStr = os:cmd(f("protoc --proto_path '~s'"
+    Protoc = find_protoc(),
+    DRStr = os:cmd(f("'~s' --proto_path '~s'"
                      " --decode=~s '~s'"
                      " < '~s' > '~s'; echo $?~n",
-                     [TmpDir, MsgName, ProtoFile, EMsgFile, TxtFile])),
+                     [Protoc, TmpDir, MsgName, ProtoFile, EMsgFile, TxtFile])),
     0 = list_to_integer(lib:nonl(DRStr)),
-    ERStr = os:cmd(f("protoc --proto_path '~s'"
+    ERStr = os:cmd(f("'~s' --proto_path '~s'"
                      " --encode=~s '~s'"
                      " < '~s' > '~s'; echo $?~n",
-                     [TmpDir, MsgName, ProtoFile, TxtFile, PMsgFile])),
+                     [Protoc, TmpDir, MsgName, ProtoFile, TxtFile, PMsgFile])),
     0 = list_to_integer(lib:nonl(ERStr)),
     {ok, ProtoBin} = file:read_file(PMsgFile),
     ProtoBin.
 
 
 f(F,A) -> io_lib:format(F,A).
+
+check_protoc_can_do_map_fields() ->
+    case find_protoc_version() of
+        {ok, Vsn} when Vsn >= [3,0] ->
+            true;
+        {ok, _} ->
+            false;
+        {error,Reason} ->
+            error(Reason)
+    end.
+
+find_protoc_version() ->
+    Output = os:cmd(find_protoc() ++ " --version"),
+    case find_protoc_version_aux(string:tokens(Output, " \t\r\n"), Output) of
+        {ok, _}=Res -> Res;
+        {error, X}=Res ->
+            io:format(user,"Trouble finding protoc version in ~s~n", [X]),
+            Res
+    end.
+
+find_protoc() ->
+    case os:getenv("PROTOC") of
+        false  -> os:find_executable("protoc");
+        Protoc -> Protoc
+    end.
+
+find_protoc_version_aux(["libprotoc", VersionStr | _], All) ->
+    try {ok, [list_to_integer(X) || X <- string:tokens(VersionStr, ".")]}
+    catch error:badarg -> {error, {failed_to_interpret, VersionStr, All}}
+    end;
+find_protoc_version_aux([_ | Rest], All) ->
+    find_protoc_version_aux(Rest, All);
+find_protoc_version_aux([], All) ->
+    {error, {no_version_string_found, All}}.
+
