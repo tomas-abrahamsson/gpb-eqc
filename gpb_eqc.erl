@@ -284,9 +284,9 @@ value(fixed32,_) ->
 value(sfixed32,_) ->
     sint(32);
 value(double, _) ->
-    real();
+    frequency([{70,real()}, {10,'infinity'}, {10,'-infinity'}, {10,nan}]);
 value(float, _) ->
-    real();
+    frequency([{70,real()}, {10,'infinity'}, {10,'-infinity'}, {10,nan}]);
 value(bytes, _) ->
     binary();
 value(string, _) ->
