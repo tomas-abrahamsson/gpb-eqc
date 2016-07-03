@@ -45,16 +45,28 @@ message_defs(Opts) ->
     %% a message of that kind.
     %% left_of/1 guarantees that the messages only refer to earlier definitions
     %% Enums are globally unique. Hence, we generate them globally
-    ?LET(MsgNames,eqc_gen:non_empty(ulist("m")),
+    DoAny = not lists:member(no_any, Opts),
+    ?LET({MsgNames,Any}, {eqc_gen:non_empty(ulist("m")),
+                          elements([[], ['google.protobuf.Any' || DoAny]])},
          ?LET(EnumDefs,enums(),
               begin
-                  shuffle(EnumDefs ++
-                          [ {{msg,Msg},message_fields(
-                                         left_of(Msg,MsgNames),
-                                         [ EName || {{enum,EName},_}<-EnumDefs],
-                                         Opts)}
-                            || Msg<-MsgNames])
+                  AnyDef = [mk_anymsg_def() || Any /= []],
+                  EnumNames = [EName || {{enum,EName},_}<-EnumDefs],
+                  shuffle(EnumDefs
+                          ++ AnyDef
+                          ++ [{{msg,Msg},message_fields(
+                                           left_of(Msg,Any++MsgNames),
+                                           EnumNames,
+                                           Opts)}
+                              || Msg<-MsgNames])
               end)).
+
+mk_anymsg_def() ->
+    {{msg,'google.protobuf.Any'},
+     [#?gpb_field{name=type_url, type=string,
+                  fnum=1, rnum=2, occurrence=required, opts=[]},
+      #?gpb_field{name=value, type=bytes,
+                  fnum=2, rnum=3, occurrence=required, opts=[]}]}.
 
 %% Take all values left of a certain value
 left_of(X,Xs) ->
@@ -217,79 +229,96 @@ enums([Ename|Enames],Conss) ->
 
 %% generator for messages that respect message definitions
 
-message(MessageDefs) ->
+message(MessageDefs,Opts) ->
     MsgDefs = [MD || {{msg,_MsgName},_}=MD <- MessageDefs], % filter out enums
-    ?LET({{msg,Msg},_Fields},oneof(MsgDefs),
-         message(Msg,MessageDefs)).
+    CandidateMsgDefs = case proplists:get_value(any_translate, Opts) of
+                           undefined ->
+                               MsgDefs;
+                           _ ->
+                               [MD || {{msg,Name},_}=MD <- MsgDefs,
+                                      Name /= 'google.protobuf.Any']
+                       end,
+    ?LET({{msg,Msg},_Fields},oneof(CandidateMsgDefs),
+         message(Msg,MessageDefs,Opts)).
 
-message(Msg,MessageDefs) ->
+message(Msg,MessageDefs,Opts) ->
     Fields = proplists:get_value({msg,Msg},MessageDefs),
     FieldValues = [case Field of
-                       #?gpb_field{} -> field_value(Field, MessageDefs);
-                       #gpb_oneof{}  -> oneof_value(Field, MessageDefs)
+                       #?gpb_field{} -> field_value(Field, MessageDefs, Opts);
+                       #gpb_oneof{}  -> oneof_value(Field, MessageDefs, Opts)
                    end
                    || Field <- Fields],
     list_to_tuple([Msg|FieldValues]).
 
-oneof_value(#gpb_oneof{fields=OFields}, MessageDefs) ->
+oneof_value(#gpb_oneof{fields=OFields}, MessageDefs, Opts) ->
     ?LET(OField, oneof(OFields),
          begin
              #?gpb_field{name=Name} = OField,
              oneof([undefined,
                     {Name, field_value(OField#?gpb_field{occurrence=required},
-                                       MessageDefs)}])
+                                       MessageDefs,
+                                       Opts)}])
          end).
 
-field_value(#?gpb_field{type=Type, occurrence=Occurrence}, MsgDefs) ->
-    field_val2(Type, Occurrence, MsgDefs).
+field_value(#?gpb_field{type=Type, occurrence=Occurrence}, MsgDefs, Opts) ->
+    field_val2(Type, Occurrence, MsgDefs, Opts).
 
-field_val2(Type, optional, MsgDefs) ->
-    default(undefined, value(Type,MsgDefs));
-field_val2({map,KeyType,ValueType}, repeated, MsgDefs) ->
-    ?LET(Keys, list(value(KeyType, MsgDefs)),
-         [{Key, value(ValueType, MsgDefs)} || Key <- lists:usort(Keys)]);
-field_val2(Type, repeated, MsgDefs) ->
-    list(value(Type, MsgDefs));
-field_val2(Type, required, MsgDefs) ->
-    value(Type,MsgDefs).
+field_val2(Type, optional, MsgDefs, Opts) ->
+    default(undefined, value(Type,MsgDefs,Opts));
+field_val2({map,KeyType,ValueType}, repeated, MsgDefs, Opts) ->
+    ?LET(Keys, list(value(KeyType, MsgDefs, Opts)),
+         [{Key, value(ValueType, MsgDefs, Opts)} || Key <- lists:usort(Keys)]);
+field_val2(Type, repeated, MsgDefs, Opts) ->
+    list(value(Type, MsgDefs, Opts));
+field_val2(Type, required, MsgDefs, Opts) ->
+    value(Type,MsgDefs, Opts).
 
-value({msg,M},MessageDefs) ->
-    message(M,MessageDefs);
-value({enum,E},MessageDefs) ->
+value({msg,M},MessageDefs,Opts) ->
+    if M == 'google.protobuf.Any' ->
+            case proplists:get_value(any_translate,Opts) of
+                undefined ->
+                    message(M,MessageDefs,Opts);
+                _ ->
+                    uint(32)
+            end;
+       M /= 'google.protobuf.Any' ->
+            message(M,MessageDefs,Opts)
+    end;
+value({enum,E},MessageDefs,_Opts) ->
     {value, {{enum,E},EnumValues}} = lists:keysearch({enum,E}, 1, MessageDefs),
     ?LET({Symbolic, _ActualValue}, elements(EnumValues),
          Symbolic);
-value({map,KeyType,ValueType}, MessageDefs) ->
-    {value(KeyType, MessageDefs),value(ValueType, MessageDefs)};
-value(bool,_) ->
+value({map,KeyType,ValueType}, MessageDefs, Opts) ->
+    {value(KeyType, MessageDefs, Opts), value(ValueType, MessageDefs, Opts)};
+value(bool,_,_) ->
     bool();
-value(sint32,_) ->
+value(sint32,_,_) ->
     sint(32);
-value(sint64,_) ->
+value(sint64,_,_) ->
     sint(64);
-value(int32,_) ->
+value(int32,_,_) ->
     int(32);
-value(int64,_) ->
+value(int64,_,_) ->
     int(64);
-value(uint32,_) ->
+value(uint32,_,_) ->
     uint(32);
-value(uint64,_) ->
+value(uint64,_,_) ->
     uint(64);
-value(fixed64,_) ->
+value(fixed64,_,_) ->
     uint(64);
-value(sfixed64,_) ->
+value(sfixed64,_,_) ->
     sint(64);
-value(fixed32,_) ->
+value(fixed32,_,_) ->
     uint(32);
-value(sfixed32,_) ->
+value(sfixed32,_,_) ->
     sint(32);
-value(double, _) ->
+value(double, _,_) ->
     frequency([{70,real()}, {10,'infinity'}, {10,'-infinity'}, {10,nan}]);
-value(float, _) ->
+value(float, _,_) ->
     frequency([{70,real()}, {10,'infinity'}, {10,'-infinity'}, {10,nan}]);
-value(bytes, _) ->
+value(bytes, _,_) ->
     binary();
-value(string, _) ->
+value(string, _,_) ->
     list(encodable_unicode_code_point()).
 
 encodable_unicode_code_point() ->
@@ -324,65 +353,69 @@ pow2(N) when N < 0 -> 1/pow2(-N).
 
 prop_encode_decode() ->
     Mod = gpb_eqc_m,
-    ?FORALL(MsgDefs,message_defs(),
-            ?FORALL({Msg, {Encoder, Decoder, COpts}},
-                    {message(MsgDefs), encoder_decoder(Mod)},
-                    begin
-                        MsgName = element(1, Msg),
-                        install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
-                        Bin = encode_msg(Msg, MsgDefs, Encoder, COpts),
-                        DecodedMsg = decode_msg(Bin, MsgName, MsgDefs, Decoder,
-                                                COpts),
-                        ?WHENFAIL(io:format("~p /= ~p\n",[Msg, DecodedMsg]),
-                                  msg_approximately_equals(Msg, DecodedMsg,
-                                                           MsgDefs))
-                    end)).
+    ?FORALL(
+       MsgDefs,message_defs(),
+       ?FORALL(
+          {Encoder, Decoder, COpts}, encoder_decoder(Mod),
+          ?FORALL(
+             Msg, message(MsgDefs, COpts),
+             begin
+                 MsgName = element(1, Msg),
+                 install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
+                 Bin = encode_msg(Msg, MsgDefs, Encoder, COpts),
+                 DecodedMsg = decode_msg(Bin, MsgName, MsgDefs, Decoder, COpts),
+                 ?WHENFAIL(io:format("~p /= ~p\n",[Msg, DecodedMsg]),
+                           msg_approximately_equals(Msg, DecodedMsg,
+                                                    MsgDefs, COpts))
+             end))).
 
 %% add a round-trip via the `protoc' program in the protobuf package.
 %% The `protoc' is the compiler generates code from a .proto file, but
 %% it can also decode and encode messages on the fly, given a .proto
 %% file, so we can use it as an sort of interop test.
 prop_encode_decode_via_protoc() ->
-    MDOpts = case check_protoc_can_do_map_fields() of
-                 true  -> [];
-                 false -> [no_maps]
-             end,
+    MDOpts1 = case check_protoc_can_do_map_fields() of
+                  true  -> [];
+                  false -> [no_maps]
+              end,
+    MDOpts = MDOpts1 ++ [no_any],
     Mod = gpb_eqc_m,
-    ?FORALL(MsgDefs,message_defs(MDOpts),
-            ?FORALL({Msg, {Encoder, Decoder, COpts}},
-                    {message(MsgDefs), encoder_decoder(Mod)},
-                    begin
-                        MsgName = element(1, Msg),
-                        install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
-                        TmpDir = get_create_tmpdir(),
-                        install_msg_defs_as_proto(MsgDefs, TmpDir),
-                        GpbBin = encode_msg(Msg, MsgDefs, Encoder, COpts),
-                        ProtoBin = decode_then_reencode_via_protoc(
-                                     GpbBin, Msg, TmpDir),
-                        DecodedMsg = decode_msg(ProtoBin, MsgName, MsgDefs,
-                                                Decoder, COpts),
-                        ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
-                                  msg_approximately_equals(Msg, DecodedMsg,
-                                                           MsgDefs))
-
-
-                    end)).
+    ?FORALL(
+       MsgDefs,message_defs(MDOpts),
+       ?FORALL(
+          {Encoder, Decoder, COpts}, encoder_decoder(Mod, [no_any]),
+          ?FORALL(
+             Msg, message(MsgDefs, COpts),
+             begin
+                 MsgName = element(1, Msg),
+                 install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
+                 TmpDir = get_create_tmpdir(),
+                 install_msg_defs_as_proto(MsgDefs, TmpDir),
+                 GpbBin = encode_msg(Msg, MsgDefs, Encoder, COpts),
+                 ProtoBin = decode_then_reencode_via_protoc(
+                              GpbBin, Msg, TmpDir),
+                 DecodedMsg = decode_msg(ProtoBin, MsgName, MsgDefs,
+                                         Decoder, COpts),
+                 ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
+                           msg_approximately_equals(Msg, DecodedMsg,
+                                                    MsgDefs, COpts))
+             end))).
 
 %% test that we can ignore unknown fields
 prop_encode_decode_with_skip() ->
     Mod1 = gpb_eqc_m1,
     Mod2 = gpb_eqc_m2,
     ?FORALL(
-       MsgDefs, message_defs(),
+       MsgDefs, message_defs([no_any]),
        ?FORALL(
-          InitialMsg, message(MsgDefs),
+          InitialMsg, message(MsgDefs, []),
           ?FORALL(
              {{SubMsg, SubDefs},
               {Encoder1, Decoder1, COpts1},
               {Encoder2, Decoder2, COpts2}},
              {message_subset_defs(InitialMsg, MsgDefs),
-              encoder_decoder(Mod1),
-              encoder_decoder(Mod2)},
+              encoder_decoder(Mod1, [no_any]),
+              encoder_decoder(Mod2, [no_any])},
              begin
                  MsgName = element(1, InitialMsg),
                  install_msg_defs(Mod1, MsgDefs, Encoder1, Decoder1, COpts1),
@@ -394,28 +427,32 @@ prop_encode_decode_with_skip() ->
                                       COpts2),
                  ?WHENFAIL(io:format("~p /= ~p\n",[SubMsg, Decoded]),
                            msg_approximately_equals(SubMsg, Decoded,
-                                                    SubDefs))
+                                                    SubDefs, []))
              end))).
 
 %% test merging of messages
 prop_merge() ->
     Mod = gpb_eqc_m,
-    ?FORALL(MsgDefs,message_defs(),
-        ?FORALL(MsgName, oneof([ M || {{msg,M},_}<-MsgDefs]),
-            ?FORALL({Msg1, Msg2, {Encoder, Decoder, COpts}},
-                    {message(MsgName,MsgDefs), message(MsgName,MsgDefs),
-                     encoder_decoder(Mod)},
-                    begin
-                        install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
-                        MergedMsg = merge_msgs(Msg1, Msg2, MsgDefs,
-                                               Encoder, Decoder, COpts),
-                        Bin1 = encode_msg(Msg1, MsgDefs, Encoder, COpts),
-                        Bin2 = encode_msg(Msg2, MsgDefs, Encoder, COpts),
-                        MergedBin = <<Bin1/binary,Bin2/binary>>,
-                        DecodedMerge = decode_msg(MergedBin, MsgName, MsgDefs,
-                                                  Decoder, COpts),
-                        msg_equals(MergedMsg, DecodedMerge, MsgDefs)
-                    end))).
+    ?FORALL(
+       MsgDefs, message_defs(),
+       ?FORALL(
+          MsgName, oneof([M || {{msg,M},_} <- MsgDefs]),
+          ?FORALL(
+             {Encoder, Decoder, COpts}, encoder_decoder(Mod),
+             ?FORALL(
+                {Msg1, Msg2}, {message(MsgName, MsgDefs, COpts),
+                               message(MsgName, MsgDefs, COpts)},
+                begin
+                    install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
+                    MergedMsg = merge_msgs(Msg1, Msg2, MsgDefs,
+                                           Encoder, Decoder, COpts),
+                    Bin1 = encode_msg(Msg1, MsgDefs, Encoder, COpts),
+                    Bin2 = encode_msg(Msg2, MsgDefs, Encoder, COpts),
+                    MergedBin = <<Bin1/binary,Bin2/binary>>,
+                    DecodedMerge = decode_msg(MergedBin, MsgName, MsgDefs,
+                                              Decoder, COpts),
+                    msg_equals(MergedMsg, DecodedMerge, MsgDefs, COpts)
+                end)))).
 
 %% compute a subset of the fields, and also a subset of the msg,
 %% corresponding to the subset of the fields.
@@ -425,6 +462,8 @@ message_subset_defs(Msg, MsgDefs) ->
          [case Elem of
               {{enum,_}, _}=Enum ->
                   Enum;
+              {{msg,'google.protobuf.Any'}, _Fields}=MsgDef -> % keep intact
+                  MsgDef;
               {{msg,MsgName}, MsgFields} ->
                   {{msg, MsgName}, msg_fields_subset_skips(MsgFields)}
           end
@@ -507,12 +546,23 @@ remove_skips_recalculate_rnums(FieldsAndSkips) ->
           FieldsAndSkips),
     lists:reverse(RecalculatedFieldsReversed).
 
-encoder_decoder(Mod) ->
-    {oneof([gpb, Mod]),
-     oneof([gpb, Mod]),
-     [{copy_bytes,        oneof([false, true, auto, choose(2,4)])},
-      {field_pass_method, oneof([pass_as_record, pass_as_params])}]
-     ++ map_opts()}.
+encoder_decoder(Mod) -> encoder_decoder(Mod, []).
+encoder_decoder(Mod, Opts) ->
+    DoAny = not lists:member(no_any, Opts),
+    ?LET(
+       {Encoder, Decoder}, {oneof([gpb, Mod]), oneof([gpb, Mod])},
+       ?LET(
+          COpts1,
+          [{copy_bytes,        oneof([false, true, auto, choose(2,4)])},
+           {field_pass_method, oneof([pass_as_record, pass_as_params])}
+           | map_opts()],
+          ?LET(
+             COpts2, any_translation_opts(COpts1),
+             if DoAny, Encoder /= gpb, Decoder /= gpb ->
+                     {Encoder, Decoder, COpts1 ++ COpts2};
+                true ->
+                     {Encoder, Decoder, COpts1}
+             end))).
 
 map_opts() ->
     HaveMaps = case get(cache_have_maps) of
@@ -537,6 +587,61 @@ have_maps() ->
     catch error:undef ->
             false
     end.
+
+any_translation_opts(Opts0) ->
+    DoMaps = proplists:get_bool(maps, Opts0),
+    ?LET(DoTranslate, oneof([false, {true, bool(), bool()}]),
+         case DoTranslate of
+             {true, TranslateMerge, TranslateVerify} ->
+                 Encode = if DoMaps ->
+                                  [{encode,{?MODULE,any_tr_pack_m,['$1']}}];
+                             not DoMaps ->
+                                  [{encode,{?MODULE,any_tr_pack_r,['$1']}}]
+                          end,
+                 Decode = if DoMaps ->
+                                  [{decode,{?MODULE,any_tr_unpack_m,['$1']}}];
+                             not DoMaps ->
+                                  [{decode,{?MODULE,any_tr_unpack_r,['$1']}}]
+                          end,
+                 Merge  = [{merge,{?MODULE,any_tr_merge,['$1','$2']}}
+                           || TranslateMerge],
+                 Verify = [{verify,{?MODULE,any_tr_verify,['$1','$errorf']}}
+                           || TranslateVerify],
+                 [{any_translate, Encode ++ Decode ++ Merge ++ Verify}];
+             false ->
+                 []
+         end).
+
+
+any_tr_pack_m(N) ->
+    NStr = integer_to_list(N),
+    maps:from_list([{type_url,NStr},
+                    {value,list_to_binary(NStr)}]).
+
+any_tr_unpack_m(M) ->
+    ML = maps:to_list(M),
+    NStr = proplists:get_value(type_url,ML),
+    NBin = proplists:get_value(value,ML),
+    N = list_to_integer(NStr),
+    N = list_to_integer(binary_to_list(NBin)),
+    N.
+
+
+any_tr_pack_r(N) ->
+    NStr = integer_to_list(N),
+    {'google.protobuf.Any',NStr,list_to_binary(NStr)}.
+
+any_tr_unpack_r({'google.protobuf.Any',NStr,NBin}) ->
+    N = list_to_integer(NStr),
+    N = list_to_integer(binary_to_list(NBin)),
+    N.
+
+any_tr_merge(_,N2) ->
+    N2.
+
+any_tr_verify(V, _ErrorF) when is_integer(V) -> ok;
+any_tr_verify(_, ErrorF) -> ErrorF(not_an_integer).
+
 
 encode_msg(Msg, MsgDefs, Encoder, COpts) ->
     case Encoder of
@@ -565,13 +670,13 @@ decode_msg(Bin, MsgName, MsgDefs, Decoder, COpts) ->
                 false ->
                     Decoder:decode_msg(Bin, MsgName);
                 true ->
-                    map_decode_msg(Bin, MsgName, MsgDefs, Decoder)
+                    map_decode_msg(Bin, MsgName, MsgDefs, Decoder, COpts)
             end
     end.
 
-map_decode_msg(Bin, MsgName, MsgDefs, Decoder) ->
+map_decode_msg(Bin, MsgName, MsgDefs, Decoder, COpts) ->
     MsgAsMap = Decoder:decode_msg(Bin, MsgName),
-    map_to_msg(MsgAsMap, MsgName, MsgDefs).
+    map_to_msg(MsgAsMap, MsgName, MsgDefs, COpts).
 
 merge_msgs(Msg1, Msg2, MsgDefs, Encoder, Decoder, COpts) ->
     if Encoder == gpb, Decoder == gpb ->
@@ -597,7 +702,7 @@ map_merge_msgs(Msg1, Msg2, MsgDefs, Mod, COpts) ->
     Msg2AsMap = msg_to_map(Msg2, MsgDefs, COpts),
     MsgName = element(1, Msg1),
     ResultAsMap = Mod:merge_msgs(Msg1AsMap, Msg2AsMap, MsgName),
-    map_to_msg(ResultAsMap, MsgName, MsgDefs).
+    map_to_msg(ResultAsMap, MsgName, MsgDefs, COpts).
 
 install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts) ->
     if Encoder == gpb, Decoder == gpb ->
@@ -624,8 +729,8 @@ delete_old_versions_of_code(Mod) ->
     code:delete(Mod),
     ok.
 
-msg_equals(Msg1, Msg2, MsgDefs) ->
-    case msg_approximately_equals(Msg1, Msg2, MsgDefs) of
+msg_equals(Msg1, Msg2, MsgDefs, Opts) ->
+    case msg_approximately_equals(Msg1, Msg2, MsgDefs, Opts) of
         true  ->
             true;
         false ->
@@ -635,28 +740,34 @@ msg_equals(Msg1, Msg2, MsgDefs) ->
             equals(Msg1,Msg2)
     end.
 
-msg_approximately_equals(M1, M2, MsgDefs)
+msg_approximately_equals(M1, M2, MsgDefs, Opts)
   when is_tuple(M1), is_tuple(M2),
        element(1,M1) == element(1,M2),
        tuple_size(M1) == tuple_size(M2) ->
     MsgName = element(1,M1),
     {{msg,MsgName},Fields} = lists:keyfind({msg,MsgName},1,MsgDefs),
     lists:all(fun({F1, F2, Field}) ->
-                      field_approximately_equals(F1, F2, Field, MsgDefs)
+                      field_approximately_equals(F1, F2, Field, MsgDefs, Opts)
               end,
               lists:zip3(tl(tuple_to_list(M1)),
                          tl(tuple_to_list(M2)),
                          Fields));
-msg_approximately_equals(_X, _Y, _MsgDefs) ->
+msg_approximately_equals(_X, _Y, _MsgDefs, _Opts) ->
     false.
 
-field_approximately_equals(F1, F2, #?gpb_field{type={map,_,VT}}, MsgDefs) ->
+field_approximately_equals(F1, F2, #?gpb_field{type={map,_,VT}},
+                           MsgDefs, Opts) ->
+    DoTranslateAny = proplists:get_value(any_translate,Opts) /= undefined,
     lists:all(fun({{K1,V1}, {K2,V2}}) ->
                       case VT of
+                          {msg,'google.protobuf.Any'} when DoTranslateAny ->
+                              is_value_approx_eq(K1,K2)
+                                  andalso
+                                  is_value_approx_eq(V1,V2);
                           {msg,_} ->
                               is_value_approx_eq(K1,K2)
                                   andalso
-                                  msg_approximately_equals(V1,V2,MsgDefs);
+                                  msg_approximately_equals(V1,V2,MsgDefs,Opts);
                           _ ->
                               is_value_approx_eq(K1,K2)
                                   andalso
@@ -664,30 +775,39 @@ field_approximately_equals(F1, F2, #?gpb_field{type={map,_,VT}}, MsgDefs) ->
                       end
               end,
               lists:zip(lists:sort(F1),lists:sort(F2)));
-field_approximately_equals(F1, F2, #?gpb_field{type={msg,_},
-                                               occurrence=Occ}, MsgDefs) ->
-    case Occ of
-        repeated ->
-            lists:all(fun({E1,E2}) -> msg_approximately_equals(E1, E2, MsgDefs)
+field_approximately_equals(F1, F2, #?gpb_field{type={msg,MsgName},
+                                               occurrence=Occ},
+                           MsgDefs, Opts) ->
+    DoTranslateAny = proplists:get_value(any_translate,Opts) /= undefined,
+    case {Occ, MsgName} of
+        {_, 'google.protobuf.Any'} when DoTranslateAny ->
+            is_value_approx_eq(F1, F2);
+        {repeated,_} ->
+            lists:all(fun({E1,E2}) ->
+                              msg_approximately_equals(E1, E2, MsgDefs, Opts)
                       end,
                       lists:zip(F1,F2));
-        optional ->
+        {optional,_} ->
             if F1 == undefined, F2 == undefined ->
                     true;
                true ->
-                    msg_approximately_equals(F1, F2, MsgDefs)
+                    msg_approximately_equals(F1, F2, MsgDefs, Opts)
             end;
-        required ->
-            msg_approximately_equals(F1, F2, MsgDefs)
+        {required,_} ->
+            msg_approximately_equals(F1, F2, MsgDefs, Opts)
     end;
-field_approximately_equals({T,F1}, {T,F2}, #gpb_oneof{fields=OFs},MsgDefs) ->
+field_approximately_equals({T,F1}, {T,F2}, #gpb_oneof{fields=OFs},
+                           MsgDefs, Opts) ->
+    DoTranslateAny = proplists:get_value(any_translate,Opts) /= undefined,
     case lists:keyfind(T,#?gpb_field.name,OFs) of
+        #?gpb_field{type={msg,'google.protobuf.Any'}} when DoTranslateAny ->
+            is_value_approx_eq(F1, F2);
         #?gpb_field{type={msg,_}} ->
-            msg_approximately_equals(F1, F2, MsgDefs);
+            msg_approximately_equals(F1, F2, MsgDefs, Opts);
         _ ->
             is_value_approx_eq(F1, F2)
     end;
-field_approximately_equals(F1, F2, _Field, _MsgDefs) ->
+field_approximately_equals(F1, F2, _Field, _MsgDefs, _Opts) ->
     is_value_approx_eq(F1, F2).
 
 is_value_approx_eq(F1, F2) when is_float(F1), is_float(F2) ->
@@ -742,28 +862,44 @@ msg_to_map(Msg, MsgDefs, COpts) ->
                                   Value /= undefined])
     end.
 
-field_to_map(V, #?gpb_field{type={msg,_},occurrence=Occurrence},MsgDefs,COpts) ->
-    submsg_to_map(Occurrence, V, MsgDefs, COpts);
+field_to_map(V, #?gpb_field{type={msg,MsgName},occurrence=Occurrence},
+             MsgDefs,COpts) ->
+    submsg_to_map1(Occurrence, MsgName, V, MsgDefs, COpts);
 field_to_map(V, #?gpb_field{type={map,_,ValueType}}, MsgDefs, COpts) ->
     maps:from_list(
       [case ValueType of
-           {msg, _} -> {K, submsg_to_map(required, V2, MsgDefs, COpts)};
+           {msg, MsgName} ->
+               {K, submsg_to_map1(required, MsgName, V2, MsgDefs, COpts)};
            _        -> {K, V2}
        end
        || {K,V2} <- V]);
 field_to_map(V, _FieldDef, _MsgDefs, _COpts) ->
     V.
 
-submsg_to_map(required, V, MsgDefs, COpts) ->
+submsg_to_map1(Occurrence, MsgName, V, MsgDefs, COpts) ->
+    if MsgName == 'google.protobuf.Any' ->
+            case proplists:get_value(any_translate, COpts) of
+                undefined ->
+                    submsg_to_map2(Occurrence, V, MsgDefs, COpts);
+                _ ->
+                    %% it is really an integer since we've added translations
+                    %% for it
+                    V
+            end;
+       true ->
+            submsg_to_map2(Occurrence, V, MsgDefs, COpts)
+    end.
+
+submsg_to_map2(required, V, MsgDefs, COpts) ->
     msg_to_map(V, MsgDefs, COpts);
-submsg_to_map(repeated, Seq, MsgDefs, COpts) ->
+submsg_to_map2(repeated, Seq, MsgDefs, COpts) ->
     [msg_to_map(Elem, MsgDefs, COpts) || Elem <- Seq];
-submsg_to_map(optional, V, MsgDefs, COpts) ->
+submsg_to_map2(optional, V, MsgDefs, COpts) ->
     if V == undefined -> undefined;
        V /= undefined -> msg_to_map(V, MsgDefs, COpts)
     end.
 
-map_to_msg(Map, MsgName, MsgDefs) ->
+map_to_msg(Map, MsgName, MsgDefs, COpts) ->
     {{msg,MsgName},Fields} = lists:keyfind({msg,MsgName}, 1, MsgDefs),
     list_to_tuple(
       [MsgName |
@@ -773,7 +909,7 @@ map_to_msg(Map, MsgName, MsgDefs) ->
                     error ->
                         undefined;
                     {ok, V} ->
-                        field_from_map(V, Field, MsgDefs)
+                        field_from_map(V, Field, MsgDefs, COpts)
                 end;
             #gpb_oneof{name=FName, fields=OFields} ->
                 case maps:find(FName, Map) of
@@ -783,30 +919,45 @@ map_to_msg(Map, MsgName, MsgDefs) ->
                         undefined;
                     {ok, {Tag, TV}} ->
                         Field = lists:keyfind(Tag, #?gpb_field.name, OFields),
-                        {Tag, field_from_map(TV, Field, MsgDefs)}
+                        {Tag, field_from_map(TV, Field, MsgDefs, COpts)}
                 end
         end
         || F <- Fields]]).
 
 field_from_map(V, #?gpb_field{type={msg,SubMsgName}, occurrence=Occurrence},
-               MsgDefs) ->
-    submsg_from_map(Occurrence, V, SubMsgName, MsgDefs);
-field_from_map(V, #?gpb_field{type={map,_,ValueType}}, MsgDefs) ->
+               MsgDefs, COpts) ->
+    submsg_from_map1(Occurrence, V, SubMsgName, MsgDefs, COpts);
+field_from_map(V, #?gpb_field{type={map,_,ValueType}}, MsgDefs, COpts) ->
     [case ValueType of
-         {msg, Name2} -> {K, submsg_from_map(required, V2, Name2, MsgDefs)};
+         {msg, Name2} -> {K, submsg_from_map1(required, V2, Name2, MsgDefs,
+                                              COpts)};
          _ -> {K,V2}
      end
      || {K,V2} <- maps:to_list(V)];
-field_from_map(V, _FieldDef, _MsgDefs) ->
+field_from_map(V, _FieldDef, _MsgDefs, _COpts) ->
     V.
 
-submsg_from_map(required, Map, MsgName, MsgDefs) ->
-    map_to_msg(Map, MsgName, MsgDefs);
-submsg_from_map(repeated, Seq, MsgName, MsgDefs) ->
-    [map_to_msg(Elem, MsgName, MsgDefs) || Elem <- Seq];
-submsg_from_map(optional, V, MsgName, MsgDefs) ->
+submsg_from_map1(Occurrence, Map, MsgName, MsgDefs, COpts) ->
+    if MsgName == 'google.protobuf.Any' ->
+            case proplists:get_value(any_translate, COpts) of
+                undefined ->
+                    submsg_from_map2(Occurrence, Map, MsgName, MsgDefs, COpts);
+                _ ->
+                    %% it is really an integer since we've added translations
+                    %% for it
+                    Map
+            end;
+       true ->
+            submsg_from_map2(Occurrence, Map, MsgName, MsgDefs, COpts)
+    end.
+
+submsg_from_map2(required, Map, MsgName, MsgDefs, COpts) ->
+    map_to_msg(Map, MsgName, MsgDefs, COpts);
+submsg_from_map2(repeated, Seq, MsgName, MsgDefs, COpts) ->
+    [map_to_msg(Elem, MsgName, MsgDefs, COpts) || Elem <- Seq];
+submsg_from_map2(optional, V, MsgName, MsgDefs, COpts) ->
     if V == undefined -> undefined;
-       V /= undefined -> map_to_msg(V, MsgName, MsgDefs)
+       V /= undefined -> map_to_msg(V, MsgName, MsgDefs, COpts)
     end.
 
 get_create_tmpdir() ->
