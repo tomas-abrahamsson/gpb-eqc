@@ -52,11 +52,12 @@ message_defs(Opts) ->
               begin
                   AnyDef = [mk_anymsg_def() || Any /= []],
                   EnumNames = [EName || {{enum,EName},_}<-EnumDefs],
-                  shuffle(EnumDefs
+                  Enum0Names = [EName || {{enum,EName},[{_,0}|_]}<-EnumDefs],
+                 shuffle(EnumDefs
                           ++ AnyDef
                           ++ [{{msg,Msg},message_fields(
                                            left_of(Msg,Any++MsgNames),
-                                           EnumNames,
+                                           EnumNames, Enum0Names,
                                            Opts)}
                               || Msg<-MsgNames])
               end)).
@@ -74,7 +75,7 @@ left_of(X,Xs) ->
                             Y/=X
                     end,Xs).
 
-message_fields(MsgNames, EnumNames, Opts) ->
+message_fields(MsgNames, EnumNames, Enum0Names, Opts) ->
     %% can we have definitions without any field?
     DoMapFields = not lists:member(no_maps, Opts),
     ?LET({FieldDefs, FNumBase0},
@@ -83,7 +84,7 @@ message_fields(MsgNames, EnumNames, Opts) ->
                             {optional, msg_field_type(MsgNames, EnumNames)},
                             {repeated, msg_field_type(MsgNames, EnumNames)},
                             {oneof,    oneof_fields(MsgNames, EnumNames)}]
-                           ++ [{repeated, map_field(MsgNames, EnumNames)}
+                           ++ [{repeated, map_field(MsgNames, Enum0Names)}
                                || DoMapFields]),
                   field_name()})),
           uint(10)},
@@ -138,7 +139,7 @@ map_key_types() ->
      fixed64,sfixed64,
      fixed32,
      sfixed32,
-     bytes
+     string
     ].
 
 mk_fields(FieldDefs, FNumBase) ->
@@ -975,7 +976,22 @@ install_msg_defs_as_proto(MsgDefs, TmpDir) ->
     ok = file:write_file(ProtoFile, msg_defs_to_proto(MsgDefs)).
 
 msg_defs_to_proto(MsgDefs) ->
-    iolist_to_binary(lists:map(fun msg_def_to_proto/1, MsgDefs)).
+    iolist_to_binary(
+      ["syntax=\"proto2\";\n",
+       lists:map(fun msg_def_to_proto/1, MsgDefs)]).
+
+contains_mapfield([{{msg,_},Fields} | Rest]) ->
+    HasMapField = lists:any(fun(#?gpb_field{type={map,_,_}}) -> true;
+                               (_) -> false
+                            end,
+                            Fields),
+    if HasMapField -> true;
+       not HasMapField -> contains_mapfield(Rest)
+    end;
+contains_mapfield([_ | Rest]) ->
+    contains_mapfield(Rest);
+contains_mapfield([]) ->
+    false.
 
 msg_def_to_proto({{enum, Name}, EnumValues}) ->
     f("enum ~s {~n"
@@ -987,7 +1003,7 @@ msg_def_to_proto({{msg, Name}, Fields}) ->
     f("message ~s {~n"
       "~s"
       "}~n~n",
-      [Name, lists:map(fun(#?gpb_field{}=F) -> field_to_proto(F, true);
+      [Name, lists:map(fun(#?gpb_field{}=F) -> field_to_proto(F, unless_map);
                           (#gpb_oneof{}=F) ->  oneof_to_proto(F)
                        end,
                        Fields)]).
@@ -996,19 +1012,22 @@ field_to_proto(#?gpb_field{name=FName, fnum=FNum, type=Type, opts=Opts,
                            occurrence=Occurrence}, ShowOccurrence) ->
     Packed = lists:member(packed, Opts),
     f("  ~s ~s ~s = ~w~s;~n",
-      [if ShowOccurrence     -> Occurrence;
-          not ShowOccurrence -> "  "
+      [case {ShowOccurrence,Type} of
+           {unless_map,{map,_,_}} -> "  ";
+           {unless_map,_}         -> Occurrence;
+           {false,_}              -> "  "
        end,
-       case Type of
-           {msg,Name2} -> Name2;
-           {enum,Name2} -> Name2;
-           Type        -> Type
-       end,
+       fmt_type(Type),
        FName,
        FNum,
        if Packed     -> " [packed=true]";
           not Packed -> ""
        end]).
+
+fmt_type({msg,Name2})  -> Name2;
+fmt_type({enum,Name2}) -> Name2;
+fmt_type({map,KT,VT})  -> f("map<~s,~s>", [fmt_type(KT),fmt_type(VT)]);
+fmt_type(Type)         -> Type.
 
 oneof_to_proto(#gpb_oneof{name=FName, fields=OFields}) ->
     f("  oneof ~s {~n"
