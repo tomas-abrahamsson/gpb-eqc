@@ -393,16 +393,33 @@ prop_encode_decode_via_protoc() ->
                  MsgName = element(1, Msg),
                  install_msg_defs(Mod, MsgDefs, Encoder, Decoder, COpts),
                  TmpDir = get_create_tmpdir(),
-                 install_msg_defs_as_proto(MsgDefs, TmpDir),
-                 GpbBin = encode_msg(Msg, MsgDefs, Encoder, COpts),
-                 ProtoBin = decode_then_reencode_via_protoc(
-                              GpbBin, Msg, TmpDir),
-                 DecodedMsg = decode_msg(ProtoBin, MsgName, MsgDefs,
-                                         Decoder, COpts),
-                 ?WHENFAIL(io:format("~p /= ~p\n",[Msg,DecodedMsg]),
-                           msg_approximately_equals(Msg, DecodedMsg,
-                                                    MsgDefs, COpts))
+                 try
+                     install_msg_defs_as_proto(MsgDefs, TmpDir),
+                     GpbBin = encode_msg(Msg, MsgDefs, Encoder, COpts),
+                     ProtoBin = decode_then_reencode_via_protoc(
+                                  GpbBin, Msg, TmpDir),
+                     DecodedMsg = decode_msg(ProtoBin, MsgName, MsgDefs,
+                                             Decoder, COpts),
+                     ?WHENFAIL(begin
+                                   maybe_copy_tmpdir(TmpDir),
+                                   io:format("~p /= ~p\n",[Msg,DecodedMsg])
+                               end,
+                               msg_approximately_equals(Msg, DecodedMsg,
+                                                        MsgDefs, COpts))
+                 after
+                     delete_tmpdir(TmpDir)
+                 end
              end))).
+
+maybe_copy_tmpdir(TmpDir) ->
+    case os:getenv("GPB_EQC_COPY_TMPDIR_ON_FAIL") of
+        false ->
+            ok;
+        X when is_list(X) ->
+            SaveDir = TmpDir ++ "-save",
+            io:format("Copying to save-dir ~p...", [SaveDir]),
+            cp_dir(TmpDir, SaveDir)
+    end.
 
 %% test that we can ignore unknown fields
 prop_encode_decode_with_skip() ->
@@ -968,6 +985,11 @@ get_create_tmpdir() ->
     filelib:ensure_dir(filename:join(D, "dummy-file-name")),
     [file:delete(X) || X <- filelib:wildcard(filename:join(D,"*"))],
     D.
+
+cp_dir(SrcDir, DestDir) -> % expects SrcDir contains only files, ie no cp -r
+    filelib:ensure_dir(filename:join(DestDir, "dummy-file-name")),
+    [file:copy(F, filename:join(DestDir,filename:basename(F)))
+     || F <- filelib:wildcard(filename:join(SrcDir,"*"))].
 
 delete_tmpdir(TmpDir) ->
     [file:delete(X) || X <- filelib:wildcard(filename:join(TmpDir,"*"))],
