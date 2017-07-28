@@ -25,9 +25,11 @@ qc_prop_test_() ->
             P when is_list(P) ->
                 {"QuickCheck tests", AllProps}
         end,
+    NumTests = length(PropsToTest),
+    PerTcTimeout = 600, %% shrinking can sometimes take a long time
     {Descr,
-     {timeout, 600,  %% timeout for all tests
-      [{timeout, 300, %% timeout for each test
+     {timeout, NumTests * PerTcTimeout,  %% timeout for all tests
+      [{timeout, 600, %% timeout for each test
         [{atom_to_list(Prop),
           fun() -> true = eqc:quickcheck(?MODULE:Prop()) end}]}
        || Prop <- PropsToTest]}}.
