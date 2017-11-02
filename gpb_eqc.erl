@@ -159,9 +159,9 @@ mk_fields(FieldDefs, FNumBase) ->
              ({{{repeated, Type}, FieldName}, RNum}, FNum) ->
                   Opts = case Type of
                              {map,_,_} -> [];
-                             {msg,_} -> []; %% FIXME: why not packed?
-                             string  -> []; %% FIXME: why not packed?
-                             bytes   -> []; %% FIXME: why not packed?
+                             {msg,_} -> [];
+                             string  -> [];
+                             bytes   -> [];
                              _       -> elements([[], [packed]])
                          end,
                   {#?gpb_field{name=FieldName, fnum=FNum, rnum=RNum,
